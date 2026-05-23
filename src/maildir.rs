@@ -6,36 +6,33 @@ use core::{
     str::FromStr,
 };
 
-use alloc::{borrow::ToOwned, string::String};
-use std::{
-    ffi::{OsStr, OsString},
-    io,
-    path::{Path, PathBuf},
-};
+use alloc::string::String;
 
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+use crate::path::MaildirPath;
+
+#[derive(Clone, Debug, Error)]
 pub enum MaildirError {
-    #[error("Path at {0} is not a valid Maildir subdir")]
-    InvalidSubdirPath(PathBuf),
-    #[error("Path at {0} is not a valid Maildir")]
-    InvalidMaildirPath(PathBuf),
-    #[error("Missing subdir /{0} at Maildir {1}")]
-    MissingSubdir(&'static str, PathBuf),
-    #[error("Invalid Maildir subdir {0:?}: expected cur, new or tmp")]
-    InvalidSubdir(OsString),
-    #[error("Missing parent directory for {1}")]
-    InvalidParent(#[source] io::Error, PathBuf),
-    #[error("Invalid parent directory for {0}")]
-    InvalidParentName(PathBuf),
+    /// The given path is not a directory.
+    #[error("path {0} is not a directory")]
+    NotDir(MaildirPath),
+
+    /// The directory does not look like a Maildir (missing `cur`,
+    /// `new`, or `tmp` subdirectory).
+    #[error("missing {0}/ subdirectory at Maildir {1}")]
+    MissingSubdir(&'static str, MaildirPath),
+
+    /// The name does not match `cur`, `new`, or `tmp`.
+    #[error("invalid Maildir subdir {0:?}: expected cur, new or tmp")]
+    InvalidSubdir(String),
 }
 
 pub const CUR: &str = "cur";
 pub const NEW: &str = "new";
 pub const TMP: &str = "tmp";
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MaildirSubdir {
     Cur,
     New,
@@ -43,14 +40,14 @@ pub enum MaildirSubdir {
 }
 
 impl FromStr for MaildirSubdir {
-    type Err = String;
+    type Err = MaildirError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             CUR => Ok(Self::Cur),
             NEW => Ok(Self::New),
             TMP => Ok(Self::Tmp),
-            s => Err(format!("invalid maildir subdir {s}")),
+            _ => Err(MaildirError::InvalidSubdir(s.into())),
         }
     }
 }
@@ -65,74 +62,34 @@ impl fmt::Display for MaildirSubdir {
     }
 }
 
-impl TryFrom<PathBuf> for MaildirSubdir {
-    type Error = MaildirError;
-
-    fn try_from(mut path: PathBuf) -> Result<Self, Self::Error> {
-        // if path is a file, take the parent
-        if path.is_file() {
-            path = if let Some(parent_path) = path.parent() {
-                parent_path.to_owned()
-            } else {
-                match path.canonicalize() {
-                    Ok(path) => path,
-                    Err(err) => return Err(MaildirError::InvalidParent(err, path)),
-                }
-            };
-        };
-
-        // at this point path should be a dir
-        if !path.is_dir() {
-            return Err(MaildirError::InvalidSubdirPath(path));
-        }
-
-        let Some(subdir_name) = path.file_name() else {
-            return Err(MaildirError::InvalidParentName(path));
-        };
-
-        match subdir_name {
-            name if name == CUR => Ok(Self::Cur),
-            name if name == NEW => Ok(Self::New),
-            name if name == TMP => Ok(Self::Tmp),
-            name => Err(MaildirError::InvalidSubdir(name.to_os_string())),
-        }
-    }
-}
-
-impl TryFrom<&OsStr> for MaildirSubdir {
-    type Error = MaildirError;
-
-    fn try_from(value: &OsStr) -> Result<Self, Self::Error> {
-        match value {
-            value if value == CUR => Ok(Self::Cur),
-            value if value == NEW => Ok(Self::New),
-            value if value == TMP => Ok(Self::Tmp),
-            value => Err(MaildirError::InvalidSubdir(value.to_os_string())),
-        }
-    }
-}
-
 /// A Maildir on the filesystem.
 ///
 /// Represents a directory with the standard `cur`, `new`, and `tmp`
-/// subdirectories. Use [`MaildirCreate`] to initialise one and
-/// [`TryFrom<PathBuf>`] to open an existing one.
+/// subdirectories. Use [`MaildirCreate`] to initialise one and the
+/// client `load_maildir` helper to open an existing one.
 ///
 /// [`MaildirCreate`]: crate::coroutines::maildir_create::MaildirCreate
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Maildir {
-    root: PathBuf,
-    cur: PathBuf,
-    new: PathBuf,
-    tmp: PathBuf,
+    root: MaildirPath,
 }
 
 impl Maildir {
-    pub fn name(&self) -> Option<&str> {
-        self.root.file_name().and_then(|s| s.to_str())
+    /// Builds a [`Maildir`] from `root` without checking the
+    /// subdirectories exist.
+    pub fn from_path(root: impl Into<MaildirPath>) -> Self {
+        Self { root: root.into() }
     }
 
-    pub fn subdir(&self, subdir: &MaildirSubdir) -> &Path {
+    pub fn path(&self) -> &MaildirPath {
+        &self.root
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.root.file_name()
+    }
+
+    pub fn subdir(&self, subdir: &MaildirSubdir) -> MaildirPath {
         match subdir {
             MaildirSubdir::Cur => self.cur(),
             MaildirSubdir::New => self.new(),
@@ -140,16 +97,16 @@ impl Maildir {
         }
     }
 
-    pub fn cur(&self) -> &Path {
-        &self.cur
+    pub fn cur(&self) -> MaildirPath {
+        self.root.join(CUR)
     }
 
-    pub fn new(&self) -> &Path {
-        &self.new
+    pub fn new(&self) -> MaildirPath {
+        self.root.join(NEW)
     }
 
-    pub fn tmp(&self) -> &Path {
-        &self.tmp
+    pub fn tmp(&self) -> MaildirPath {
+        self.root.join(TMP)
     }
 }
 
@@ -159,48 +116,26 @@ impl Hash for Maildir {
     }
 }
 
-impl AsRef<Path> for Maildir {
-    fn as_ref(&self) -> &Path {
-        self.root.as_ref()
+impl AsRef<MaildirPath> for Maildir {
+    fn as_ref(&self) -> &MaildirPath {
+        &self.root
     }
 }
 
-impl TryFrom<PathBuf> for Maildir {
-    type Error = MaildirError;
-
-    fn try_from(root: PathBuf) -> Result<Self, Self::Error> {
-        if !root.is_dir() {
-            return Err(MaildirError::InvalidMaildirPath(root));
-        }
-
-        let cur = root.join(CUR);
-        if !cur.is_dir() {
-            return Err(MaildirError::MissingSubdir(CUR, root));
-        }
-
-        let new = root.join(NEW);
-        if !new.is_dir() {
-            return Err(MaildirError::MissingSubdir(NEW, root));
-        }
-
-        let tmp = root.join(TMP);
-        if !tmp.is_dir() {
-            return Err(MaildirError::MissingSubdir(TMP, root));
-        }
-
-        Ok(Maildir {
-            root,
-            cur,
-            new,
-            tmp,
-        })
+impl From<MaildirPath> for Maildir {
+    fn from(root: MaildirPath) -> Self {
+        Self { root }
     }
 }
 
-impl TryFrom<&Path> for Maildir {
-    type Error = MaildirError;
+impl From<String> for Maildir {
+    fn from(root: String) -> Self {
+        Self { root: root.into() }
+    }
+}
 
-    fn try_from(root: &Path) -> Result<Self, Self::Error> {
-        root.to_path_buf().try_into()
+impl From<&str> for Maildir {
+    fn from(root: &str) -> Self {
+        Self { root: root.into() }
     }
 }

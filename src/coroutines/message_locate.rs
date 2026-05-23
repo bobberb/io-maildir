@@ -1,27 +1,29 @@
 //! I/O-free coroutine to locate a Maildir message by its ID.
 
+use core::mem;
+
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     string::{String, ToString},
 };
-use std::path::{Path, PathBuf};
 
 use log::trace;
 use thiserror::Error;
 
 use crate::{
-    flag::{Flag, Flags},
+    flag::Flags,
     maildir::{Maildir, MaildirSubdir},
+    path::MaildirPath,
 };
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirMessageLocateError {
-    #[error("Invalid Maildir locate arg: {0:?}")]
-    Invalid(Option<MaildirMessageLocateArg>),
+    #[error("invalid Maildir locate arg {0:?} for state {1:?}")]
+    Invalid(Option<MaildirMessageLocateArg>, State),
 
     /// No message with the given ID was found in the Maildir.
-    #[error("Message {0} not found in Maildir")]
+    #[error("message {0} not found in Maildir")]
     NotFound(String),
 }
 
@@ -30,39 +32,58 @@ pub enum MaildirMessageLocateError {
 pub enum MaildirMessageLocateResult {
     /// The coroutine has successfully terminated its progression.
     Ok {
-        path: PathBuf,
+        path: MaildirPath,
         subdir: MaildirSubdir,
         flags: Flags,
     },
 
-    /// The coroutine wants the caller to read the entries inside the
-    /// given directories and feed back [`MaildirMessageLocateArg::DirRead`].
-    WantsDirRead(BTreeSet<String>),
+    /// The caller must check whether the given paths exist as regular
+    /// files and feed back [`MaildirMessageLocateArg::FileExists`].
+    WantsFileExists(BTreeSet<MaildirPath>),
+
+    /// The caller must read the entries of the given directories and
+    /// feed back [`MaildirMessageLocateArg::DirRead`].
+    WantsDirRead(BTreeSet<MaildirPath>),
 
     /// The coroutine encountered an error.
     Err(MaildirMessageLocateError),
 }
 
-/// Argument fed back to [`MaildirMessageLocate::resume`] after the
-/// caller performed the requested filesystem operation.
+/// Internal progression state of [`MaildirMessageLocate`].
+#[derive(Clone, Debug, Default)]
+pub enum State {
+    /// Initial state: about to probe `/new/<id>` and `/tmp/<id>`.
+    Start { maildir: Maildir, id: String },
+    /// Probes issued; awaiting their results.
+    CheckingNewTmp {
+        maildir: Maildir,
+        id: String,
+        new_path: MaildirPath,
+        tmp_path: MaildirPath,
+    },
+    /// `/new` and `/tmp` did not contain the id; scanning `/cur`.
+    ReadingCur { id: String },
+    #[default]
+    Invalid,
+}
+
+/// Argument fed back to [`MaildirMessageLocate::resume`].
 #[derive(Clone, Debug)]
 pub enum MaildirMessageLocateArg {
+    /// Response to [`MaildirMessageLocateResult::WantsFileExists`].
+    FileExists(BTreeMap<MaildirPath, bool>),
+
     /// Response to [`MaildirMessageLocateResult::WantsDirRead`].
-    ///
-    /// Maps each requested directory path to the set of entry paths
-    /// found inside it.
-    DirRead(BTreeMap<String, BTreeSet<String>>),
+    DirRead(BTreeMap<MaildirPath, BTreeSet<MaildirPath>>),
 }
 
 /// I/O-free coroutine to locate a Maildir message file by its ID.
 ///
-/// Searches `/new` and `/tmp` first (no I/O needed for those), then
-/// scans `/cur` to find a file whose name starts with the given ID.
+/// Probes `/new/<id>` and `/tmp/<id>` first; if neither exists,
+/// scans `/cur` for an entry whose filename starts with the id.
 #[derive(Clone, Debug)]
 pub struct MaildirMessageLocate {
-    maildir: Maildir,
-    id: String,
-    wants_dir_read: bool,
+    state: State,
 }
 
 impl MaildirMessageLocate {
@@ -70,9 +91,10 @@ impl MaildirMessageLocate {
     /// inside `maildir`.
     pub fn new(maildir: Maildir, id: impl ToString) -> Self {
         Self {
-            maildir,
-            id: id.to_string(),
-            wants_dir_read: false,
+            state: State::Start {
+                maildir,
+                id: id.to_string(),
+            },
         }
     }
 
@@ -81,76 +103,80 @@ impl MaildirMessageLocate {
         &mut self,
         arg: Option<impl Into<MaildirMessageLocateArg>>,
     ) -> MaildirMessageLocateResult {
-        match (self.wants_dir_read, arg.map(Into::into)) {
-            (false, None) => {
-                trace!("inspect /new and /tmp for {}", self.id);
+        match (mem::take(&mut self.state), arg.map(Into::into)) {
+            (State::Start { maildir, id }, None) => {
+                let new_path = maildir.new().join(&id);
+                let tmp_path = maildir.tmp().join(&id);
+                trace!("wants file-exists for {new_path}, {tmp_path}");
 
-                let path = self.maildir.new().join(&self.id);
-                if path.is_file() {
+                let probes = BTreeSet::from_iter([new_path.clone(), tmp_path.clone()]);
+                self.state = State::CheckingNewTmp {
+                    maildir,
+                    id,
+                    new_path,
+                    tmp_path,
+                };
+                MaildirMessageLocateResult::WantsFileExists(probes)
+            }
+            (
+                State::CheckingNewTmp {
+                    maildir,
+                    id,
+                    new_path,
+                    tmp_path,
+                },
+                Some(MaildirMessageLocateArg::FileExists(probes)),
+            ) => {
+                if probes.get(&new_path).copied().unwrap_or(false) {
+                    trace!("located {id} in /new");
                     return MaildirMessageLocateResult::Ok {
-                        path,
+                        path: new_path,
                         subdir: MaildirSubdir::New,
                         flags: Flags::default(),
                     };
                 }
 
-                let path = self.maildir.tmp().join(&self.id);
-                if path.is_file() {
+                if probes.get(&tmp_path).copied().unwrap_or(false) {
+                    trace!("located {id} in /tmp");
                     return MaildirMessageLocateResult::Ok {
-                        path,
+                        path: tmp_path,
                         subdir: MaildirSubdir::Tmp,
                         flags: Flags::default(),
                     };
                 }
 
-                trace!("wants /cur read for {}", self.id);
-                let paths =
-                    BTreeSet::from_iter([self.maildir.cur().to_string_lossy().into_owned()]);
-                self.wants_dir_read = true;
+                trace!("wants read of /cur for {id}");
+                let paths = BTreeSet::from_iter([maildir.cur()]);
+                self.state = State::ReadingCur { id };
                 MaildirMessageLocateResult::WantsDirRead(paths)
             }
-            (true, Some(MaildirMessageLocateArg::DirRead(entries))) => {
-                trace!("inspect /cur entries for {}", self.id);
-
+            (State::ReadingCur { id }, Some(MaildirMessageLocateArg::DirRead(entries))) => {
                 let paths = entries.into_values().next().unwrap_or_default();
 
                 for path in paths {
-                    let path = PathBuf::from(&path);
+                    let Some(name) = path.file_name() else {
+                        continue;
+                    };
 
-                    if !path.is_file() {
+                    if !name.starts_with(&id) {
                         continue;
                     }
 
-                    if let Some(result) = match_id(&path, &self.id) {
-                        return result;
-                    }
+                    let flags = Flags::from(&path);
+                    trace!("located {id} in /cur at {path}");
+                    return MaildirMessageLocateResult::Ok {
+                        path,
+                        subdir: MaildirSubdir::Cur,
+                        flags,
+                    };
                 }
 
-                let err = MaildirMessageLocateError::NotFound(self.id.clone());
-                MaildirMessageLocateResult::Err(err)
+                MaildirMessageLocateResult::Err(MaildirMessageLocateError::NotFound(id))
             }
-            (_, arg) => {
-                let err = MaildirMessageLocateError::Invalid(arg);
+            (state, arg) => {
+                let err = MaildirMessageLocateError::Invalid(arg, state);
                 MaildirMessageLocateResult::Err(err)
             }
         }
     }
-}
-
-fn match_id(path: &Path, id: &str) -> Option<MaildirMessageLocateResult> {
-    let name = path.file_name().and_then(|n| n.to_str())?;
-    if !name.starts_with(id) {
-        return None;
-    }
-
-    let flags = match name.rsplit_once(',') {
-        None => Flags::default(),
-        Some((_, flags_str)) => Flags::from_iter(flags_str.chars().filter_map(Flag::from_char)),
-    };
-
-    Some(MaildirMessageLocateResult::Ok {
-        path: path.to_path_buf(),
-        subdir: MaildirSubdir::Cur,
-        flags,
-    })
 }

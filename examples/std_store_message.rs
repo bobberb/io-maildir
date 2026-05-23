@@ -6,80 +6,27 @@
 //! cargo run --example std_store_message
 //! ```
 
-use std::{
-    fs::{self, File},
-    io::Write,
-    path::PathBuf,
-};
-
-use io_maildir::{
-    coroutines::{
-        maildir_create::{MaildirCreate, MaildirCreateArg, MaildirCreateResult},
-        message_store::{MaildirMessageStore, MaildirMessageStoreArg, MaildirMessageStoreResult},
-    },
-    flag::Flags,
-    maildir::{Maildir, MaildirSubdir},
-};
+use io_maildir::{client::MaildirClient, flag::Flags, maildir::MaildirSubdir, path::MaildirPath};
 use tempfile::tempdir;
 
 fn main() {
     let _ = env_logger::try_init();
 
     let tmp = tempdir().unwrap();
-    let root: PathBuf = tmp.path().join("inbox");
+    let root = MaildirPath::new(tmp.path().join("inbox").to_string_lossy().into_owned());
 
-    // create a new Maildir
+    let client = MaildirClient::new(root.clone());
 
-    let mut arg: Option<MaildirCreateArg> = None;
-    let mut create = MaildirCreate::new(root.clone());
-
-    loop {
-        match create.resume(arg.take()) {
-            MaildirCreateResult::Ok => break,
-            MaildirCreateResult::WantsDirCreate(paths) => {
-                for path in paths {
-                    fs::create_dir(&path).unwrap();
-                }
-                arg = Some(MaildirCreateArg::DirCreate);
-            }
-            MaildirCreateResult::Err(err) => panic!("{err}"),
-        }
-    }
-
-    let maildir = Maildir::try_from(root).unwrap();
-
-    // store a message in /new
+    client.create_maildir(root.clone()).unwrap();
+    let maildir = client.load_maildir(root).unwrap();
 
     let contents = b"From: alice@example.com\r\nTo: bob@example.com\r\nSubject: Hello\r\n\r\nHello, world!\r\n".to_vec();
 
-    let mut arg: Option<MaildirMessageStoreArg> = None;
-    let mut store = MaildirMessageStore::new(
-        maildir.clone(),
-        MaildirSubdir::New,
-        Flags::default(),
-        contents,
-    );
-
-    let (id, path) = loop {
-        match store.resume(arg.take()) {
-            MaildirMessageStoreResult::Ok { id, path } => break (id, path),
-            MaildirMessageStoreResult::WantsFileCreate(files) => {
-                for (path, contents) in files {
-                    File::create(&path).unwrap().write_all(&contents).unwrap();
-                }
-                arg = Some(MaildirMessageStoreArg::FileCreate);
-            }
-            MaildirMessageStoreResult::WantsRename(pairs) => {
-                for (from, to) in pairs {
-                    fs::rename(&from, &to).unwrap();
-                }
-                arg = Some(MaildirMessageStoreArg::Rename);
-            }
-            MaildirMessageStoreResult::Err(err) => panic!("{err}"),
-        }
-    };
+    let (id, path) = client
+        .store(maildir, MaildirSubdir::New, Flags::default(), contents)
+        .unwrap();
 
     println!("Stored message:");
     println!("  ID:   {id}");
-    println!("  Path: {}", path.display());
+    println!("  Path: {path}");
 }

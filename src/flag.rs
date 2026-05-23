@@ -1,20 +1,17 @@
 use core::fmt;
 
-use alloc::{string::ToString, vec::Vec};
-use std::{collections::HashSet, path::Path};
+use alloc::collections::BTreeSet;
 
 use log::trace;
 
-#[derive(Clone, Debug, Default)]
-pub struct Flags(HashSet<Flag>);
+use crate::path::MaildirPath;
 
-impl From<&Path> for Flags {
-    fn from(path: &Path) -> Self {
+#[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub struct Flags(BTreeSet<Flag>);
+
+impl From<&MaildirPath> for Flags {
+    fn from(path: &MaildirPath) -> Self {
         let Some(file_name) = path.file_name() else {
-            return Default::default();
-        };
-
-        let Some(file_name) = file_name.to_str() else {
             return Default::default();
         };
 
@@ -28,13 +25,28 @@ impl From<&Path> for Flags {
 
 impl fmt::Display for Flags {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut flags: Vec<_> = self.0.clone().into_iter().map(|f| f.to_string()).collect();
-        flags.sort();
-        write!(f, "{}", flags.join(""))
+        // BTreeSet iterates in sorted order, so the on-disk
+        // representation is deterministic.
+        for flag in &self.0 {
+            write!(f, "{flag}")?;
+        }
+        Ok(())
     }
 }
 
 impl Flags {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn contains(&self, flag: &Flag) -> bool {
+        self.0.contains(flag)
+    }
+
     pub fn extend(&mut self, flags: Flags) {
         self.0.extend(flags.0)
     }
@@ -50,7 +62,7 @@ impl FromIterator<Flag> for Flags {
     }
 }
 
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Flag {
     Passed,
     Replied,

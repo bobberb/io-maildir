@@ -1,108 +1,145 @@
 //! I/O-free coroutine to list Maildirs inside a root directory.
 
-use alloc::{
-    collections::{BTreeMap, BTreeSet},
-    string::String,
-};
-use std::{
-    collections::HashSet,
-    path::{Path, PathBuf},
-};
+use core::mem;
+
+use alloc::collections::{BTreeMap, BTreeSet};
 
 use log::trace;
 use thiserror::Error;
 
-use crate::maildir::Maildir;
+use crate::{
+    maildir::{CUR, Maildir, NEW, TMP},
+    path::MaildirPath,
+};
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirListError {
-    #[error("Invalid Maildir list arg: {0:?}")]
-    Invalid(Option<MaildirListArg>),
+    #[error("invalid Maildir list arg {0:?} for state {1:?}")]
+    Invalid(Option<MaildirListArg>, State),
 }
 
 /// Result returned by [`MaildirList::resume`].
 #[derive(Clone, Debug)]
 pub enum MaildirListResult {
     /// The coroutine has successfully terminated its progression.
-    Ok(HashSet<Maildir>),
+    Ok(BTreeSet<Maildir>),
 
-    /// The coroutine wants the caller to read the entries inside the
-    /// given directories and feed back [`MaildirListArg::DirRead`].
-    WantsDirRead(BTreeSet<String>),
+    /// The caller must read the entries of the given directories and
+    /// feed back [`MaildirListArg::DirRead`].
+    WantsDirRead(BTreeSet<MaildirPath>),
+
+    /// The caller must check whether the given paths exist as
+    /// directories and feed back [`MaildirListArg::DirExists`].
+    WantsDirExists(BTreeSet<MaildirPath>),
 
     /// The coroutine encountered an error.
     Err(MaildirListError),
 }
 
-/// Argument fed back to [`MaildirList::resume`] after the
-/// caller performed the requested filesystem operation.
+/// Internal progression state of [`MaildirList`].
+#[derive(Clone, Debug, Default)]
+pub enum State {
+    Start(MaildirPath),
+    /// Probing each scanned candidate for its `cur`/`new`/`tmp`
+    /// subdirectories. `markers` maps each probed path to the
+    /// candidate root it belongs to.
+    CheckingSubdirs {
+        markers: BTreeMap<MaildirPath, MaildirPath>,
+    },
+    #[default]
+    Invalid,
+}
+
+/// Argument fed back to [`MaildirList::resume`].
 #[derive(Clone, Debug)]
 pub enum MaildirListArg {
     /// Response to [`MaildirListResult::WantsDirRead`].
-    ///
-    /// Maps each requested directory path to the set of entry paths
-    /// found inside it.
-    DirRead(BTreeMap<String, BTreeSet<String>>),
+    DirRead(BTreeMap<MaildirPath, BTreeSet<MaildirPath>>),
+
+    /// Response to [`MaildirListResult::WantsDirExists`].
+    DirExists(BTreeMap<MaildirPath, bool>),
 }
 
 /// I/O-free coroutine to list all valid Maildirs inside a root
 /// directory.
 ///
-/// Entries starting with `.` and entries that are not valid Maildirs
-/// are silently ignored.
+/// Entries starting with `.` are skipped. A child is reported as a
+/// Maildir when it contains all three of `cur`, `new` and `tmp` as
+/// subdirectories.
 #[derive(Debug)]
 pub struct MaildirList {
-    wants_dir_read: Option<BTreeSet<String>>,
+    state: State,
 }
 
 impl MaildirList {
     /// Creates a new coroutine that will list Maildirs inside `root`.
-    pub fn new(root: impl AsRef<Path>) -> Self {
-        let paths = BTreeSet::from_iter([root.as_ref().to_string_lossy().into_owned()]);
+    pub fn new(root: impl Into<MaildirPath>) -> Self {
         Self {
-            wants_dir_read: Some(paths),
+            state: State::Start(root.into()),
         }
     }
 
     /// Makes the listing progress.
     pub fn resume(&mut self, arg: Option<impl Into<MaildirListArg>>) -> MaildirListResult {
-        match (self.wants_dir_read.take(), arg.map(Into::into)) {
-            (Some(paths), None) => {
-                trace!("wants filesystem I/O to read {} directories", paths.len());
+        match (mem::take(&mut self.state), arg.map(Into::into)) {
+            (State::Start(root), None) => {
+                trace!("wants read of {root}");
+
+                let paths = BTreeSet::from_iter([root.clone()]);
+                self.state = State::Start(root);
                 MaildirListResult::WantsDirRead(paths)
             }
-            (None, Some(MaildirListArg::DirRead(entries))) => {
-                trace!("resume after listing Maildirs");
+            (State::Start(_), Some(MaildirListArg::DirRead(entries))) => {
+                let mut markers = BTreeMap::new();
 
-                let entries = entries.into_values().next().unwrap_or_default();
-                let mut maildirs = HashSet::new();
+                for (_dir, names) in entries {
+                    for path in names {
+                        let Some(name) = path.file_name() else {
+                            continue;
+                        };
 
-                for path in entries {
-                    let path = PathBuf::from(&path);
-
-                    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                        continue;
-                    };
-
-                    if name.starts_with('.') {
-                        continue;
-                    }
-
-                    match Maildir::try_from(path.clone()) {
-                        Ok(maildir) => {
-                            maildirs.insert(maildir);
+                        if name.starts_with('.') {
+                            continue;
                         }
-                        Err(err) => {
-                            trace!("ignoring invalid Maildir at {}: {err}", path.display());
-                        }
+
+                        markers.insert(path.join(CUR), path.clone());
+                        markers.insert(path.join(NEW), path.clone());
+                        markers.insert(path.join(TMP), path.clone());
                     }
                 }
 
-                MaildirListResult::Ok(maildirs)
+                if markers.is_empty() {
+                    trace!("no candidate maildirs");
+                    return MaildirListResult::Ok(BTreeSet::new());
+                }
+
+                let probes: BTreeSet<MaildirPath> = markers.keys().cloned().collect();
+                trace!("wants dir-exists check for {} probes", probes.len());
+
+                self.state = State::CheckingSubdirs { markers };
+                MaildirListResult::WantsDirExists(probes)
             }
-            (_, arg) => {
-                let err = MaildirListError::Invalid(arg);
+            (State::CheckingSubdirs { markers }, Some(MaildirListArg::DirExists(probes))) => {
+                let mut hits: BTreeMap<MaildirPath, u8> = BTreeMap::new();
+
+                for (probe, root) in markers {
+                    if probes.get(&probe).copied().unwrap_or(false) {
+                        *hits.entry(root).or_insert(0) += 1;
+                    }
+                }
+
+                let found: BTreeSet<Maildir> = hits
+                    .into_iter()
+                    .filter(|(_, n)| *n == 3)
+                    .map(|(root, _)| Maildir::from_path(root))
+                    .collect();
+
+                trace!("found {} maildirs", found.len());
+                MaildirListResult::Ok(found)
+            }
+            (state, arg) => {
+                let err = MaildirListError::Invalid(arg, state);
                 MaildirListResult::Err(err)
             }
         }

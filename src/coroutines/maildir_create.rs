@@ -1,15 +1,19 @@
 //! I/O-free coroutine to create a Maildir.
 
-use alloc::{collections::BTreeSet, string::String};
-use std::path::Path;
+use alloc::collections::BTreeSet;
 
 use log::trace;
 use thiserror::Error;
 
+use crate::{
+    maildir::{CUR, NEW, TMP},
+    path::MaildirPath,
+};
+
 /// Errors that can occur during the coroutine progression.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirCreateError {
-    #[error("Invalid Maildir create arg: {0:?}")]
+    #[error("invalid Maildir create arg: {0:?}")]
     Invalid(Option<MaildirCreateArg>),
 }
 
@@ -19,16 +23,15 @@ pub enum MaildirCreateResult {
     /// The coroutine has successfully terminated its progression.
     Ok,
 
-    /// The coroutine wants the caller to create the given directories
-    /// and feed back [`MaildirCreateArg::DirCreate`].
-    WantsDirCreate(BTreeSet<String>),
+    /// The caller must create the given directories and feed back
+    /// [`MaildirCreateArg::DirCreate`].
+    WantsDirCreate(BTreeSet<MaildirPath>),
 
     /// The coroutine encountered an error.
     Err(MaildirCreateError),
 }
 
-/// Argument fed back to [`MaildirCreate::resume`] after the
-/// caller performed the requested filesystem operation.
+/// Argument fed back to [`MaildirCreate::resume`].
 #[derive(Clone, Debug)]
 pub enum MaildirCreateArg {
     /// Response to [`MaildirCreateResult::WantsDirCreate`].
@@ -43,24 +46,19 @@ pub enum MaildirCreateArg {
 /// created before its subdirectories.
 #[derive(Debug)]
 pub struct MaildirCreate {
-    wants_dir_create: Option<BTreeSet<String>>,
+    wants_dir_create: Option<BTreeSet<MaildirPath>>,
 }
 
 impl MaildirCreate {
     /// Creates a new coroutine that will initialise a Maildir rooted
     /// at `root`.
-    pub fn new(root: impl AsRef<Path>) -> Self {
-        let root = root.as_ref();
-        let cur = root.join("cur");
-        let new = root.join("new");
-        let tmp = root.join("tmp");
+    pub fn new(root: impl Into<MaildirPath>) -> Self {
+        let root = root.into();
+        let cur = root.join(CUR);
+        let new = root.join(NEW);
+        let tmp = root.join(TMP);
 
-        let paths = BTreeSet::from_iter([
-            root.to_string_lossy().into_owned(),
-            cur.to_string_lossy().into_owned(),
-            new.to_string_lossy().into_owned(),
-            tmp.to_string_lossy().into_owned(),
-        ]);
+        let paths = BTreeSet::from_iter([root, cur, new, tmp]);
 
         Self {
             wants_dir_create: Some(paths),
@@ -71,11 +69,11 @@ impl MaildirCreate {
     pub fn resume(&mut self, arg: Option<impl Into<MaildirCreateArg>>) -> MaildirCreateResult {
         match (self.wants_dir_create.take(), arg.map(Into::into)) {
             (Some(paths), None) => {
-                trace!("wants filesystem I/O to create {} directories", paths.len());
+                trace!("wants create of {} directories", paths.len());
                 MaildirCreateResult::WantsDirCreate(paths)
             }
             (None, Some(MaildirCreateArg::DirCreate)) => {
-                trace!("resume after creating Maildir directories");
+                trace!("maildir created");
                 MaildirCreateResult::Ok
             }
             (_, arg) => {

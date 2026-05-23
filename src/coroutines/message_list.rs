@@ -4,20 +4,18 @@ use core::mem;
 
 use alloc::{
     collections::{BTreeMap, BTreeSet},
-    string::String,
     vec::Vec,
 };
-use std::{collections::HashSet, path::PathBuf};
 
 use log::trace;
 use thiserror::Error;
 
-use crate::{maildir::Maildir, message::Message};
+use crate::{maildir::Maildir, message::Message, path::MaildirPath};
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirMessagesListError {
-    #[error("Invalid Maildir messages list arg {0:?} for state {1:?}")]
+    #[error("invalid Maildir messages list arg {0:?} for state {1:?}")]
     Invalid(Option<MaildirMessagesListArg>, State),
 }
 
@@ -25,15 +23,19 @@ pub enum MaildirMessagesListError {
 #[derive(Clone, Debug)]
 pub enum MaildirMessagesListResult {
     /// The coroutine has successfully terminated its progression.
-    Ok(HashSet<Message>),
+    Ok(BTreeSet<Message>),
 
-    /// The coroutine wants the caller to read the entries inside the
-    /// given directories and feed back [`MaildirMessagesListArg::DirRead`].
-    WantsDirRead(BTreeSet<String>),
+    /// The caller must read the entries of the given directories and
+    /// feed back [`MaildirMessagesListArg::DirRead`].
+    WantsDirRead(BTreeSet<MaildirPath>),
 
-    /// The coroutine wants the caller to read the contents of the
-    /// given files and feed back [`MaildirMessagesListArg::FileRead`].
-    WantsFileRead(BTreeSet<String>),
+    /// The caller must check whether the given paths exist as regular
+    /// files and feed back [`MaildirMessagesListArg::FileExists`].
+    WantsFileExists(BTreeSet<MaildirPath>),
+
+    /// The caller must read the contents of the given files and feed
+    /// back [`MaildirMessagesListArg::FileRead`].
+    WantsFileRead(BTreeSet<MaildirPath>),
 
     /// The coroutine encountered an error.
     Err(MaildirMessagesListError),
@@ -43,28 +45,32 @@ pub enum MaildirMessagesListResult {
 #[derive(Clone, Debug, Default)]
 pub enum State {
     Start(Maildir),
-    ReadNew(Maildir),
-    ReadCur(HashSet<String>),
-    ReadFiles,
+    Reading,
+    Checking {
+        candidates: BTreeSet<MaildirPath>,
+    },
+    ReadingFiles,
     #[default]
     Invalid,
 }
 
-/// Argument fed back to [`MaildirMessagesList::resume`] after the
-/// caller performed the requested filesystem operation.
+/// Argument fed back to [`MaildirMessagesList::resume`].
 #[derive(Clone, Debug)]
 pub enum MaildirMessagesListArg {
     /// Response to [`MaildirMessagesListResult::WantsDirRead`].
-    DirRead(BTreeMap<String, BTreeSet<String>>),
+    DirRead(BTreeMap<MaildirPath, BTreeSet<MaildirPath>>),
+
+    /// Response to [`MaildirMessagesListResult::WantsFileExists`].
+    FileExists(BTreeMap<MaildirPath, bool>),
 
     /// Response to [`MaildirMessagesListResult::WantsFileRead`].
-    FileRead(BTreeMap<String, Vec<u8>>),
+    FileRead(BTreeMap<MaildirPath, Vec<u8>>),
 }
 
 /// I/O-free coroutine to list all messages in a Maildir.
 ///
-/// Scans both the `/new` and `/cur` subdirectories and reads every
-/// message file.
+/// Scans both `/new` and `/cur` in a single batched directory read,
+/// confirms each candidate is a regular file, then reads them.
 #[derive(Debug)]
 pub struct MaildirMessagesList {
     state: State,
@@ -86,43 +92,59 @@ impl MaildirMessagesList {
     ) -> MaildirMessagesListResult {
         match (mem::take(&mut self.state), arg.map(Into::into)) {
             (State::Start(maildir), None) => {
-                trace!("wants /new read");
+                trace!("wants read of /new and /cur");
 
-                let paths = BTreeSet::from_iter([maildir.new().to_string_lossy().into_owned()]);
-                self.state = State::ReadNew(maildir);
+                let paths = BTreeSet::from_iter([maildir.new(), maildir.cur()]);
+                self.state = State::Reading;
                 MaildirMessagesListResult::WantsDirRead(paths)
             }
-            (State::ReadNew(maildir), Some(MaildirMessagesListArg::DirRead(entries))) => {
-                trace!("read /new entries, wants /cur read");
+            (State::Reading, Some(MaildirMessagesListArg::DirRead(entries))) => {
+                let mut candidates = BTreeSet::new();
 
-                let new_paths: HashSet<String> = entries
-                    .into_values()
-                    .next()
-                    .unwrap_or_default()
+                for (_dir, names) in entries {
+                    for path in names {
+                        let Some(name) = path.file_name() else {
+                            continue;
+                        };
+
+                        if name.starts_with('.') {
+                            continue;
+                        }
+
+                        candidates.insert(path);
+                    }
+                }
+
+                if candidates.is_empty() {
+                    trace!("no candidate messages");
+                    return MaildirMessagesListResult::Ok(BTreeSet::new());
+                }
+
+                let probes = candidates.clone();
+                trace!("wants file-exists for {} candidates", probes.len());
+
+                self.state = State::Checking { candidates };
+                MaildirMessagesListResult::WantsFileExists(probes)
+            }
+            (State::Checking { candidates }, Some(MaildirMessagesListArg::FileExists(probes))) => {
+                let confirmed: BTreeSet<MaildirPath> = candidates
                     .into_iter()
-                    .filter(|p| is_visible_file(p))
+                    .filter(|p| probes.get(p).copied().unwrap_or(false))
                     .collect();
 
-                let paths = BTreeSet::from_iter([maildir.cur().to_string_lossy().into_owned()]);
-                self.state = State::ReadCur(new_paths);
-                MaildirMessagesListResult::WantsDirRead(paths)
+                if confirmed.is_empty() {
+                    trace!("no confirmed messages");
+                    return MaildirMessagesListResult::Ok(BTreeSet::new());
+                }
+
+                trace!("wants read of {} files", confirmed.len());
+                self.state = State::ReadingFiles;
+                MaildirMessagesListResult::WantsFileRead(confirmed)
             }
-            (State::ReadCur(mut new_paths), Some(MaildirMessagesListArg::DirRead(entries))) => {
-                trace!("read /cur entries, wants file read");
-
-                let cur_paths = entries.into_values().next().unwrap_or_default();
-                new_paths.extend(cur_paths.into_iter().filter(|p| is_visible_file(p)));
-
-                let paths = BTreeSet::from_iter(new_paths);
-                self.state = State::ReadFiles;
-                MaildirMessagesListResult::WantsFileRead(paths)
-            }
-            (State::ReadFiles, Some(MaildirMessagesListArg::FileRead(contents))) => {
-                trace!("read message files");
-
+            (State::ReadingFiles, Some(MaildirMessagesListArg::FileRead(contents))) => {
                 let messages = contents
                     .into_iter()
-                    .map(|(path, contents)| Message::from((PathBuf::from(path), contents)))
+                    .map(|(path, contents)| Message::from((path, contents)))
                     .collect();
 
                 MaildirMessagesListResult::Ok(messages)
@@ -133,17 +155,4 @@ impl MaildirMessagesList {
             }
         }
     }
-}
-
-fn is_visible_file(path: &str) -> bool {
-    let path = PathBuf::from(path);
-
-    if !path.is_file() {
-        return false;
-    }
-
-    matches!(
-        path.file_name().and_then(|n| n.to_str()),
-        Some(name) if !name.starts_with('.')
-    )
 }

@@ -16,15 +16,15 @@ use crate::{
     flag::Flags,
     maildir::{Maildir, MaildirSubdir},
     message::INFORMATIONAL_SUFFIX_SEPARATOR,
+    path::MaildirPath,
 };
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirFlagsRemoveError {
-    #[error("Invalid Maildir flags remove arg {0:?} for state {1:?}")]
+    #[error("invalid Maildir flags remove arg {0:?} for state {1:?}")]
     Invalid(Option<MaildirFlagsRemoveArg>, State),
 
-    /// The message could not be located.
     #[error(transparent)]
     Locate(#[from] MaildirMessageLocateError),
 }
@@ -35,13 +35,15 @@ pub enum MaildirFlagsRemoveResult {
     /// The coroutine has successfully terminated its progression.
     Ok,
 
-    /// The coroutine wants the caller to read the entries inside the
-    /// given directories and feed back [`MaildirFlagsRemoveArg::DirRead`].
-    WantsDirRead(BTreeSet<String>),
+    /// Forwarded from the inner locate coroutine.
+    WantsFileExists(BTreeSet<MaildirPath>),
 
-    /// The coroutine wants the caller to rename each `(from, to)`
-    /// pair and feed back [`MaildirFlagsRemoveArg::Rename`].
-    WantsRename(Vec<(String, String)>),
+    /// Forwarded from the inner locate coroutine.
+    WantsDirRead(BTreeSet<MaildirPath>),
+
+    /// The caller must rename each `(from, to)` pair and feed back
+    /// [`MaildirFlagsRemoveArg::Rename`].
+    WantsRename(Vec<(MaildirPath, MaildirPath)>),
 
     /// The coroutine encountered an error.
     Err(MaildirFlagsRemoveError),
@@ -56,12 +58,14 @@ pub enum State {
     Invalid,
 }
 
-/// Argument fed back to [`MaildirFlagsRemove::resume`] after the
-/// caller performed the requested filesystem operation.
+/// Argument fed back to [`MaildirFlagsRemove::resume`].
 #[derive(Clone, Debug)]
 pub enum MaildirFlagsRemoveArg {
-    /// Response to [`MaildirFlagsRemoveResult::WantsDirRead`].
-    DirRead(BTreeMap<String, BTreeSet<String>>),
+    /// Forwarded to the inner locate coroutine.
+    FileExists(BTreeMap<MaildirPath, bool>),
+
+    /// Forwarded to the inner locate coroutine.
+    DirRead(BTreeMap<MaildirPath, BTreeSet<MaildirPath>>),
 
     /// Response to [`MaildirFlagsRemoveResult::WantsRename`].
     Rename,
@@ -99,6 +103,9 @@ impl MaildirFlagsRemove {
             (State::Locate(mut c), arg) => {
                 let locate_arg = match arg {
                     None => None,
+                    Some(MaildirFlagsRemoveArg::FileExists(probes)) => {
+                        Some(MaildirMessageLocateArg::FileExists(probes))
+                    }
                     Some(MaildirFlagsRemoveArg::DirRead(entries)) => {
                         Some(MaildirMessageLocateArg::DirRead(entries))
                     }
@@ -121,23 +128,19 @@ impl MaildirFlagsRemove {
                         }
                         MaildirSubdir::Cur => {
                             existing.difference(&self.flags);
+                            let new_path = rename_with_flags(&path, &self.id, &existing);
 
-                            let mut file_name = self.id.clone();
-                            file_name.push(INFORMATIONAL_SUFFIX_SEPARATOR);
-                            file_name.push_str("2,");
-                            file_name.push_str(&existing.to_string());
+                            trace!("rename {path} -> {new_path}");
 
-                            let new_path = path.with_file_name(file_name);
-                            trace!("rename {} -> {}", path.display(), new_path.display());
-
-                            let pairs = vec![(
-                                path.to_string_lossy().into_owned(),
-                                new_path.to_string_lossy().into_owned(),
-                            )];
+                            let pairs = vec![(path, new_path)];
                             self.state = State::Renamed;
                             MaildirFlagsRemoveResult::WantsRename(pairs)
                         }
                     },
+                    MaildirMessageLocateResult::WantsFileExists(probes) => {
+                        self.state = State::Locate(c);
+                        MaildirFlagsRemoveResult::WantsFileExists(probes)
+                    }
                     MaildirMessageLocateResult::WantsDirRead(paths) => {
                         self.state = State::Locate(c);
                         MaildirFlagsRemoveResult::WantsDirRead(paths)
@@ -154,4 +157,12 @@ impl MaildirFlagsRemove {
             }
         }
     }
+}
+
+fn rename_with_flags(path: &MaildirPath, id: &str, flags: &Flags) -> MaildirPath {
+    let mut name = String::from(id);
+    name.push(INFORMATIONAL_SUFFIX_SEPARATOR);
+    name.push_str("2,");
+    name.push_str(&flags.to_string());
+    path.with_file_name(&name)
 }

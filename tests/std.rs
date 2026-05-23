@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
-    path::PathBuf,
+    fs, process,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use io_maildir::{
@@ -21,18 +21,23 @@ use io_maildir::{
     },
     flag::{Flag, Flags},
     maildir::{Maildir, MaildirSubdir},
+    path::MaildirPath,
 };
 use tempfile::tempdir;
 
-fn dir_read<I: IntoIterator<Item = String>>(paths: I) -> BTreeMap<String, BTreeSet<String>> {
+fn into_path(p: impl AsRef<std::path::Path>) -> MaildirPath {
+    MaildirPath::new(p.as_ref().to_string_lossy().into_owned())
+}
+
+fn dir_read(paths: BTreeSet<MaildirPath>) -> BTreeMap<MaildirPath, BTreeSet<MaildirPath>> {
     let mut entries = BTreeMap::new();
 
     for path in paths {
         let mut children = BTreeSet::new();
 
-        for entry in fs::read_dir(&path).unwrap() {
+        for entry in fs::read_dir(path.as_str()).unwrap() {
             let entry = entry.unwrap();
-            children.insert(entry.path().to_string_lossy().into_owned());
+            children.insert(into_path(entry.path()));
         }
 
         entries.insert(path, children);
@@ -41,22 +46,52 @@ fn dir_read<I: IntoIterator<Item = String>>(paths: I) -> BTreeMap<String, BTreeS
     entries
 }
 
-fn file_read<I: IntoIterator<Item = String>>(paths: I) -> BTreeMap<String, Vec<u8>> {
+fn file_read(paths: BTreeSet<MaildirPath>) -> BTreeMap<MaildirPath, Vec<u8>> {
     let mut contents = BTreeMap::new();
     for path in paths {
-        let data = fs::read(&path).unwrap();
+        let data = fs::read(path.as_str()).unwrap();
         contents.insert(path, data);
     }
     contents
 }
 
-fn rename<I: IntoIterator<Item = (String, String)>>(pairs: I) {
+fn file_exists(paths: BTreeSet<MaildirPath>) -> BTreeMap<MaildirPath, bool> {
+    paths
+        .into_iter()
+        .map(|p| {
+            let exists = fs::metadata(p.as_str())
+                .map(|m| m.is_file())
+                .unwrap_or(false);
+            (p, exists)
+        })
+        .collect()
+}
+
+fn dir_exists(paths: BTreeSet<MaildirPath>) -> BTreeMap<MaildirPath, bool> {
+    paths
+        .into_iter()
+        .map(|p| {
+            let exists = fs::metadata(p.as_str())
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
+            (p, exists)
+        })
+        .collect()
+}
+
+fn rename(pairs: Vec<(MaildirPath, MaildirPath)>) {
     for (from, to) in pairs {
-        fs::rename(&from, &to).unwrap();
+        fs::rename(from.as_str(), to.as_str()).unwrap();
     }
 }
 
-fn create_maildir(root: PathBuf) -> Maildir {
+fn copy(pairs: Vec<(MaildirPath, MaildirPath)>) {
+    for (from, to) in pairs {
+        fs::copy(from.as_str(), to.as_str()).unwrap();
+    }
+}
+
+fn create_maildir(root: MaildirPath) -> Maildir {
     let mut arg: Option<MaildirCreateArg> = None;
     let mut coroutine = MaildirCreate::new(root.clone());
 
@@ -65,7 +100,7 @@ fn create_maildir(root: PathBuf) -> Maildir {
             MaildirCreateResult::Ok => break,
             MaildirCreateResult::WantsDirCreate(paths) => {
                 for path in paths {
-                    fs::create_dir(&path).unwrap();
+                    fs::create_dir_all(path.as_str()).unwrap();
                 }
                 arg = Some(MaildirCreateArg::DirCreate);
             }
@@ -73,7 +108,7 @@ fn create_maildir(root: PathBuf) -> Maildir {
         }
     }
 
-    Maildir::try_from(root).unwrap()
+    Maildir::from_path(root)
 }
 
 fn message_count(maildir: Maildir) -> usize {
@@ -86,10 +121,53 @@ fn message_count(maildir: Maildir) -> usize {
             MaildirMessagesListResult::WantsDirRead(paths) => {
                 arg = Some(MaildirMessagesListArg::DirRead(dir_read(paths)));
             }
+            MaildirMessagesListResult::WantsFileExists(paths) => {
+                arg = Some(MaildirMessagesListArg::FileExists(file_exists(paths)));
+            }
             MaildirMessagesListResult::WantsFileRead(paths) => {
                 arg = Some(MaildirMessagesListArg::FileRead(file_read(paths)));
             }
             MaildirMessagesListResult::Err(err) => panic!("{err}"),
+        }
+    }
+}
+
+fn run_store(
+    inbox: Maildir,
+    subdir: MaildirSubdir,
+    flags: Flags,
+    contents: Vec<u8>,
+) -> (String, MaildirPath) {
+    let mut arg: Option<MaildirMessageStoreArg> = None;
+    let mut coroutine = MaildirMessageStore::new(inbox, subdir, flags, contents);
+
+    loop {
+        match coroutine.resume(arg.take()) {
+            MaildirMessageStoreResult::Ok { id, path } => return (id, path),
+            MaildirMessageStoreResult::WantsTime => {
+                let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+                arg = Some(MaildirMessageStoreArg::Time {
+                    secs: ts.as_secs(),
+                    nanos: ts.subsec_nanos(),
+                });
+            }
+            MaildirMessageStoreResult::WantsPid => {
+                arg = Some(MaildirMessageStoreArg::Pid(process::id()));
+            }
+            MaildirMessageStoreResult::WantsHostname => {
+                arg = Some(MaildirMessageStoreArg::Hostname("localhost".into()));
+            }
+            MaildirMessageStoreResult::WantsFileCreate(files) => {
+                for (path, contents) in files {
+                    fs::write(path.as_str(), &contents).unwrap();
+                }
+                arg = Some(MaildirMessageStoreArg::FileCreate);
+            }
+            MaildirMessageStoreResult::WantsRename(pairs) => {
+                rename(pairs);
+                arg = Some(MaildirMessageStoreArg::Rename);
+            }
+            MaildirMessageStoreResult::Err(err) => panic!("{err}"),
         }
     }
 }
@@ -99,18 +177,21 @@ fn std() {
     let _ = env_logger::try_init();
 
     let workdir = tempdir().unwrap();
-    let root = workdir.path();
+    let root = into_path(workdir.path());
 
     // should list zero maildirs in empty root
 
     let mut arg: Option<MaildirListArg> = None;
-    let mut coroutine = MaildirList::new(root);
+    let mut coroutine = MaildirList::new(root.clone());
 
     let maildirs = loop {
         match coroutine.resume(arg.take()) {
             MaildirListResult::Ok(m) => break m,
             MaildirListResult::WantsDirRead(paths) => {
                 arg = Some(MaildirListArg::DirRead(dir_read(paths)));
+            }
+            MaildirListResult::WantsDirExists(paths) => {
+                arg = Some(MaildirListArg::DirExists(dir_exists(paths)));
             }
             MaildirListResult::Err(err) => panic!("{err}"),
         }
@@ -123,20 +204,23 @@ fn std() {
     let inbox = create_maildir(root.join("inbox"));
     let drafts = create_maildir(root.join("drafts"));
 
-    assert!(root.join("inbox").join("cur").is_dir());
-    assert!(root.join("inbox").join("new").is_dir());
-    assert!(root.join("inbox").join("tmp").is_dir());
+    assert!(fs::metadata(inbox.cur().as_str()).unwrap().is_dir());
+    assert!(fs::metadata(inbox.new().as_str()).unwrap().is_dir());
+    assert!(fs::metadata(inbox.tmp().as_str()).unwrap().is_dir());
 
     // should list two maildirs
 
     let mut arg: Option<MaildirListArg> = None;
-    let mut coroutine = MaildirList::new(root);
+    let mut coroutine = MaildirList::new(root.clone());
 
     let maildirs = loop {
         match coroutine.resume(arg.take()) {
             MaildirListResult::Ok(m) => break m,
             MaildirListResult::WantsDirRead(paths) => {
                 arg = Some(MaildirListArg::DirRead(dir_read(paths)));
+            }
+            MaildirListResult::WantsDirExists(paths) => {
+                arg = Some(MaildirListArg::DirExists(dir_exists(paths)));
             }
             MaildirListResult::Err(err) => panic!("{err}"),
         }
@@ -147,30 +231,10 @@ fn std() {
     // should store a message in /new
 
     let msg = b"From: alice@example.com\r\nSubject: Test\r\n\r\nBody\r\n".to_vec();
+    let (id, msg_path) = run_store(inbox.clone(), MaildirSubdir::New, Flags::default(), msg);
 
-    let mut arg: Option<MaildirMessageStoreArg> = None;
-    let mut coroutine =
-        MaildirMessageStore::new(inbox.clone(), MaildirSubdir::New, Flags::default(), msg);
-
-    let (id, msg_path) = loop {
-        match coroutine.resume(arg.take()) {
-            MaildirMessageStoreResult::Ok { id, path } => break (id, path),
-            MaildirMessageStoreResult::WantsFileCreate(files) => {
-                for (path, contents) in files {
-                    fs::write(&path, &contents).unwrap();
-                }
-                arg = Some(MaildirMessageStoreArg::FileCreate);
-            }
-            MaildirMessageStoreResult::WantsRename(pairs) => {
-                rename(pairs);
-                arg = Some(MaildirMessageStoreArg::Rename);
-            }
-            MaildirMessageStoreResult::Err(err) => panic!("{err}"),
-        }
-    };
-
-    assert!(msg_path.is_file());
-    assert!(msg_path.starts_with(inbox.new()));
+    assert!(fs::metadata(msg_path.as_str()).unwrap().is_file());
+    assert!(msg_path.starts_with(&inbox.new()));
 
     // should list messages
 
@@ -182,6 +246,9 @@ fn std() {
             MaildirMessagesListResult::Ok(m) => break m,
             MaildirMessagesListResult::WantsDirRead(paths) => {
                 arg = Some(MaildirMessagesListArg::DirRead(dir_read(paths)));
+            }
+            MaildirMessagesListResult::WantsFileExists(paths) => {
+                arg = Some(MaildirMessagesListArg::FileExists(file_exists(paths)));
             }
             MaildirMessagesListResult::WantsFileRead(paths) => {
                 arg = Some(MaildirMessagesListArg::FileRead(file_read(paths)));
@@ -200,6 +267,9 @@ fn std() {
     let message = loop {
         match coroutine.resume(arg.take()) {
             MaildirMessageGetResult::Ok(m) => break m,
+            MaildirMessageGetResult::WantsFileExists(paths) => {
+                arg = Some(MaildirMessageGetArg::FileExists(file_exists(paths)));
+            }
             MaildirMessageGetResult::WantsDirRead(paths) => {
                 arg = Some(MaildirMessageGetArg::DirRead(dir_read(paths)));
             }
@@ -212,7 +282,7 @@ fn std() {
 
     assert_eq!(message.id(), Some(id.as_str()));
 
-    // should set flags (message now lives in /new, flags are a no-op there)
+    // should set flags (message now lives in /new, flags are a no-op)
 
     let mut arg: Option<MaildirFlagsSetArg> = None;
     let flags_seen = Flags::from_iter([Flag::Seen]);
@@ -221,6 +291,9 @@ fn std() {
     loop {
         match coroutine.resume(arg.take()) {
             MaildirFlagsSetResult::Ok => break,
+            MaildirFlagsSetResult::WantsFileExists(paths) => {
+                arg = Some(MaildirFlagsSetArg::FileExists(file_exists(paths)));
+            }
             MaildirFlagsSetResult::WantsDirRead(paths) => {
                 arg = Some(MaildirFlagsSetArg::DirRead(dir_read(paths)));
             }
@@ -241,6 +314,9 @@ fn std() {
     loop {
         match coroutine.resume(arg.take()) {
             MaildirFlagsAddResult::Ok => break,
+            MaildirFlagsAddResult::WantsFileExists(paths) => {
+                arg = Some(MaildirFlagsAddArg::FileExists(file_exists(paths)));
+            }
             MaildirFlagsAddResult::WantsDirRead(paths) => {
                 arg = Some(MaildirFlagsAddArg::DirRead(dir_read(paths)));
             }
@@ -261,6 +337,9 @@ fn std() {
     loop {
         match coroutine.resume(arg.take()) {
             MaildirFlagsRemoveResult::Ok => break,
+            MaildirFlagsRemoveResult::WantsFileExists(paths) => {
+                arg = Some(MaildirFlagsRemoveArg::FileExists(file_exists(paths)));
+            }
             MaildirFlagsRemoveResult::WantsDirRead(paths) => {
                 arg = Some(MaildirFlagsRemoveArg::DirRead(dir_read(paths)));
             }
@@ -281,13 +360,14 @@ fn std() {
     loop {
         match coroutine.resume(arg.take()) {
             MaildirMessageCopyResult::Ok => break,
+            MaildirMessageCopyResult::WantsFileExists(paths) => {
+                arg = Some(MaildirMessageCopyArg::FileExists(file_exists(paths)));
+            }
             MaildirMessageCopyResult::WantsDirRead(paths) => {
                 arg = Some(MaildirMessageCopyArg::DirRead(dir_read(paths)));
             }
             MaildirMessageCopyResult::WantsCopy(pairs) => {
-                for (from, to) in pairs {
-                    fs::copy(&from, &to).unwrap();
-                }
+                copy(pairs);
                 arg = Some(MaildirMessageCopyArg::Copy);
             }
             MaildirMessageCopyResult::Err(err) => panic!("{err}"),
@@ -309,6 +389,9 @@ fn std() {
     loop {
         match coroutine.resume(arg.take()) {
             MaildirMessageMoveResult::Ok => break,
+            MaildirMessageMoveResult::WantsFileExists(paths) => {
+                arg = Some(MaildirMessageMoveArg::FileExists(file_exists(paths)));
+            }
             MaildirMessageMoveResult::WantsDirRead(paths) => {
                 arg = Some(MaildirMessageMoveArg::DirRead(dir_read(paths)));
             }
@@ -326,7 +409,7 @@ fn std() {
     // should rename maildir
 
     let mut arg: Option<MaildirRenameArg> = None;
-    let mut coroutine = MaildirRename::new(drafts.as_ref(), "archive");
+    let mut coroutine = MaildirRename::new(drafts.path().clone(), "archive");
 
     loop {
         match coroutine.resume(arg.take()) {
@@ -339,8 +422,17 @@ fn std() {
         }
     }
 
-    assert!(!root.join("drafts").is_dir());
-    assert!(root.join("archive").is_dir());
+    assert!(
+        fs::metadata(root.join("drafts").as_str())
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
+            == false
+    );
+    assert!(
+        fs::metadata(root.join("archive").as_str())
+            .unwrap()
+            .is_dir()
+    );
 
     // should delete maildirs
 
@@ -353,7 +445,7 @@ fn std() {
                 MaildirDeleteResult::Ok => break,
                 MaildirDeleteResult::WantsDirRemove(paths) => {
                     for path in paths {
-                        fs::remove_dir_all(&path).unwrap();
+                        fs::remove_dir_all(path.as_str()).unwrap();
                     }
                     arg = Some(MaildirDeleteArg::DirRemove);
                 }
@@ -370,6 +462,9 @@ fn std() {
             MaildirListResult::Ok(m) => break m,
             MaildirListResult::WantsDirRead(paths) => {
                 arg = Some(MaildirListArg::DirRead(dir_read(paths)));
+            }
+            MaildirListResult::WantsDirExists(paths) => {
+                arg = Some(MaildirListArg::DirExists(dir_exists(paths)));
             }
             MaildirListResult::Err(err) => panic!("{err}"),
         }

@@ -15,15 +15,15 @@ use crate::{
     coroutines::message_locate::*,
     maildir::{Maildir, MaildirSubdir},
     message::INFORMATIONAL_SUFFIX_SEPARATOR,
+    path::MaildirPath,
 };
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirMessageCopyError {
-    #[error("Invalid Maildir message copy arg {0:?} for state {1:?}")]
+    #[error("invalid Maildir message copy arg {0:?} for state {1:?}")]
     Invalid(Option<MaildirMessageCopyArg>, State),
 
-    /// The source message could not be located.
     #[error(transparent)]
     Locate(#[from] MaildirMessageLocateError),
 }
@@ -34,13 +34,15 @@ pub enum MaildirMessageCopyResult {
     /// The coroutine has successfully terminated its progression.
     Ok,
 
-    /// The coroutine wants the caller to read the entries inside the
-    /// given directories and feed back [`MaildirMessageCopyArg::DirRead`].
-    WantsDirRead(BTreeSet<String>),
+    /// Forwarded from the inner locate coroutine.
+    WantsFileExists(BTreeSet<MaildirPath>),
 
-    /// The coroutine wants the caller to copy each `(source, target)`
-    /// pair and feed back [`MaildirMessageCopyArg::Copy`].
-    WantsCopy(Vec<(String, String)>),
+    /// Forwarded from the inner locate coroutine.
+    WantsDirRead(BTreeSet<MaildirPath>),
+
+    /// The caller must copy each `(source, target)` pair and feed
+    /// back [`MaildirMessageCopyArg::Copy`].
+    WantsCopy(Vec<(MaildirPath, MaildirPath)>),
 
     /// The coroutine encountered an error.
     Err(MaildirMessageCopyError),
@@ -55,12 +57,14 @@ pub enum State {
     Invalid,
 }
 
-/// Argument fed back to [`MaildirMessageCopy::resume`] after the
-/// caller performed the requested filesystem operation.
+/// Argument fed back to [`MaildirMessageCopy::resume`].
 #[derive(Clone, Debug)]
 pub enum MaildirMessageCopyArg {
-    /// Response to [`MaildirMessageCopyResult::WantsDirRead`].
-    DirRead(BTreeMap<String, BTreeSet<String>>),
+    /// Forwarded to the inner locate coroutine.
+    FileExists(BTreeMap<MaildirPath, bool>),
+
+    /// Forwarded to the inner locate coroutine.
+    DirRead(BTreeMap<MaildirPath, BTreeSet<MaildirPath>>),
 
     /// Response to [`MaildirMessageCopyResult::WantsCopy`].
     Copy,
@@ -105,6 +109,9 @@ impl MaildirMessageCopy {
             (State::Locate(mut c), arg) => {
                 let locate_arg = match arg {
                     None => None,
+                    Some(MaildirMessageCopyArg::FileExists(probes)) => {
+                        Some(MaildirMessageLocateArg::FileExists(probes))
+                    }
                     Some(MaildirMessageCopyArg::DirRead(entries)) => {
                         Some(MaildirMessageLocateArg::DirRead(entries))
                     }
@@ -117,25 +124,18 @@ impl MaildirMessageCopy {
 
                 match c.resume(locate_arg) {
                     MaildirMessageLocateResult::Ok { path, subdir, .. } => {
-                        trace!("located source at {}", path.display());
+                        trace!("located source at {path}");
 
-                        let target = match self.target_subdir {
-                            Some(MaildirSubdir::Cur) => {
-                                let name =
-                                    format!("{}{}2,", self.id, INFORMATIONAL_SUFFIX_SEPARATOR);
-                                self.target.cur().join(&self.id).with_file_name(name)
-                            }
-                            Some(MaildirSubdir::New) => self.target.new().join(&self.id),
-                            Some(MaildirSubdir::Tmp) => self.target.tmp().join(&self.id),
-                            None => self.target.subdir(&subdir).join(&self.id),
-                        };
+                        let target_subdir = self.target_subdir.clone().unwrap_or(subdir);
+                        let target = build_target_path(&self.target, &target_subdir, &self.id);
 
-                        let pairs = vec![(
-                            path.to_string_lossy().into_owned(),
-                            target.to_string_lossy().into_owned(),
-                        )];
+                        let pairs = vec![(path, target)];
                         self.state = State::Copied;
                         MaildirMessageCopyResult::WantsCopy(pairs)
+                    }
+                    MaildirMessageLocateResult::WantsFileExists(probes) => {
+                        self.state = State::Locate(c);
+                        MaildirMessageCopyResult::WantsFileExists(probes)
                     }
                     MaildirMessageLocateResult::WantsDirRead(paths) => {
                         self.state = State::Locate(c);
@@ -155,5 +155,16 @@ impl MaildirMessageCopy {
                 MaildirMessageCopyResult::Err(err)
             }
         }
+    }
+}
+
+fn build_target_path(target: &Maildir, subdir: &MaildirSubdir, id: &str) -> MaildirPath {
+    match subdir {
+        MaildirSubdir::Cur => {
+            let name = format!("{id}{INFORMATIONAL_SUFFIX_SEPARATOR}2,");
+            target.cur().join(&name)
+        }
+        MaildirSubdir::New => target.new().join(id),
+        MaildirSubdir::Tmp => target.tmp().join(id),
     }
 }

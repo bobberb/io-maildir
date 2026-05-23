@@ -18,20 +18,20 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
-client = []
-serde = ["mail-parser/serde"]
+client = ["dep:gethostname"]
+parser = ["dep:mail-parser"]
+serde = ["mail-parser?/serde"]
 
 [[example]]
 name = "std_store_message"
-required-features = []
+required-features = ["client"]
 
 [dev-dependencies]
 env_logger = "0.11"
 tempfile = "3.20"
 
 [dependencies]
-gethostname = "1"
+gethostname = { version = "1", optional = true }
 log = "0.4"
-mail-parser = "0.11"
-memchr = "2.7"
+mail-parser = { version = "0.11", optional = true }
 thiserror = "2"

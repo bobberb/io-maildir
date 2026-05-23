@@ -59,13 +59,13 @@ No features required: works without [`std::fs`] and without an async runtime. Yo
 Create a fresh Maildir against a blocking caller (the same shape works under async or in-memory replay):
 
 ```rust,ignore
-use std::{collections::BTreeSet, fs, path::PathBuf};
+use std::fs;
 
-use io_maildir::coroutines::maildir_create::*;
+use io_maildir::{coroutines::maildir_create::*, path::MaildirPath};
 
-let root = PathBuf::from("/path/to/maildir");
+let root = MaildirPath::new("/path/to/maildir");
 
-let mut coroutine = MaildirCreate::new(&root);
+let mut coroutine = MaildirCreate::new(root);
 let mut arg: Option<MaildirCreateArg> = None;
 
 loop {
@@ -73,7 +73,7 @@ loop {
         MaildirCreateResult::Ok => break,
         MaildirCreateResult::WantsDirCreate(paths) => {
             for path in paths {
-                fs::create_dir(&path).unwrap();
+                fs::create_dir_all(path.as_str()).unwrap();
             }
             arg = Some(MaildirCreateArg::DirCreate);
         }
@@ -86,21 +86,19 @@ Drive a multi-step command (store a message) the same way:
 
 ```rust,ignore
 use std::{
-    collections::BTreeMap,
-    fs::{self, File},
-    io::Write,
-    path::PathBuf,
+    fs, process,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
+use gethostname::gethostname;
 use io_maildir::{
     coroutines::message_store::*,
     flag::Flags,
     maildir::{Maildir, MaildirSubdir},
+    path::MaildirPath,
 };
 
-# let root = PathBuf::from("/path/to/maildir");
-let maildir = Maildir::try_from(root).unwrap();
-
+let maildir = Maildir::from_path(MaildirPath::new("/path/to/maildir"));
 let contents = b"From: alice@example.com\r\nSubject: Hello\r\n\r\nHello!\r\n".to_vec();
 
 let mut coroutine = MaildirMessageStore::new(
@@ -114,15 +112,25 @@ let mut arg: Option<MaildirMessageStoreArg> = None;
 let (id, path) = loop {
     match coroutine.resume(arg.take()) {
         MaildirMessageStoreResult::Ok { id, path } => break (id, path),
+        MaildirMessageStoreResult::WantsTime => {
+            let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+            arg = Some(MaildirMessageStoreArg::Time { secs: ts.as_secs(), nanos: ts.subsec_nanos() });
+        }
+        MaildirMessageStoreResult::WantsPid => {
+            arg = Some(MaildirMessageStoreArg::Pid(process::id()));
+        }
+        MaildirMessageStoreResult::WantsHostname => {
+            arg = Some(MaildirMessageStoreArg::Hostname(gethostname().into_string().unwrap_or_default()));
+        }
         MaildirMessageStoreResult::WantsFileCreate(files) => {
             for (path, bytes) in files {
-                File::create(&path).unwrap().write_all(&bytes).unwrap();
+                fs::write(path.as_str(), &bytes).unwrap();
             }
             arg = Some(MaildirMessageStoreArg::FileCreate);
         }
         MaildirMessageStoreResult::WantsRename(pairs) => {
             for (from, to) in pairs {
-                fs::rename(&from, &to).unwrap();
+                fs::rename(from.as_str(), to.as_str()).unwrap();
             }
             arg = Some(MaildirMessageStoreArg::Rename);
         }
@@ -130,7 +138,7 @@ let (id, path) = loop {
     }
 };
 
-println!("stored {id} at {}", path.display());
+println!("stored {id} at {path}");
 ```
 
 ### As a std client
@@ -143,21 +151,17 @@ io-maildir = "0.0.1" # client is enabled by default
 ```
 
 ```rust,ignore
-use io_maildir::{
-    client::MaildirClient,
-    flag::Flags,
-    maildir::{Maildir, MaildirSubdir},
-};
+use io_maildir::{client::MaildirClient, flag::Flags, maildir::MaildirSubdir};
 
 let client = MaildirClient::new("/path/to/root");
 
 client.create_maildir("/path/to/root/inbox")?;
-let maildir = Maildir::try_from("/path/to/root/inbox".into())?;
+let maildir = client.load_maildir("/path/to/root/inbox")?;
 
 let contents = b"From: alice@example.com\r\nSubject: Hello\r\n\r\nHello!\r\n".to_vec();
 let (id, path) = client.store(maildir, MaildirSubdir::New, Flags::default(), contents)?;
 
-println!("stored {id} at {}", path.display());
+println!("stored {id} at {path}");
 ```
 
 *See complete examples at [./examples](https://github.com/pimalaya/io-maildir/blob/master/examples).*

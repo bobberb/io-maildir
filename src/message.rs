@@ -1,40 +1,27 @@
 use core::hash::{Hash, Hasher};
 
-use alloc::{borrow::ToOwned, vec::Vec};
-use std::path::{Path, PathBuf};
+use alloc::vec::Vec;
 
-use mail_parser::MessageParser;
-use thiserror::Error;
-
-use crate::maildir::{MaildirError, MaildirSubdir};
+use crate::path::MaildirPath;
 
 #[cfg(unix)]
 pub static INFORMATIONAL_SUFFIX_SEPARATOR: char = ':';
 #[cfg(windows)]
 pub static INFORMATIONAL_SUFFIX_SEPARATOR: char = ';';
 
-#[derive(Debug, Error)]
-pub enum MessageError {
-    #[error("Invalid parent for Maildir message at {0}")]
-    InvalidParent(PathBuf),
-    #[error(transparent)]
-    Maidir(#[from] MaildirError),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Message {
-    pub(crate) path: PathBuf,
+    pub(crate) path: MaildirPath,
     pub(crate) contents: Vec<u8>,
 }
 
 impl Message {
-    pub fn path(&self) -> &Path {
+    pub fn path(&self) -> &MaildirPath {
         &self.path
     }
 
     pub fn id(&self) -> Option<&str> {
         let file_name = self.path.file_name()?;
-        let file_name = file_name.to_str()?;
 
         let id = match file_name.rsplit_once(INFORMATIONAL_SUFFIX_SEPARATOR) {
             Some((id, _)) => id,
@@ -48,16 +35,14 @@ impl Message {
         &self.contents
     }
 
-    pub fn subdir(&self) -> Result<MaildirSubdir, MessageError> {
-        Ok(MaildirSubdir::try_from(self.path.to_owned())?)
-    }
-
+    #[cfg(feature = "parser")]
     pub fn parsed(&self) -> Option<mail_parser::Message<'_>> {
-        MessageParser::new().parse(&self.contents)
+        mail_parser::MessageParser::new().parse(&self.contents)
     }
 
+    #[cfg(feature = "parser")]
     pub fn headers(&self) -> Option<mail_parser::Message<'_>> {
-        MessageParser::new()
+        mail_parser::MessageParser::new()
             .with_minimal_headers()
             .parse(&self.contents)
     }
@@ -69,8 +54,8 @@ impl From<Message> for Vec<u8> {
     }
 }
 
-impl From<(PathBuf, Vec<u8>)> for Message {
-    fn from((path, contents): (PathBuf, Vec<u8>)) -> Self {
+impl From<(MaildirPath, Vec<u8>)> for Message {
+    fn from((path, contents): (MaildirPath, Vec<u8>)) -> Self {
         Self { path, contents }
     }
 }
