@@ -1,16 +1,20 @@
-//! I/O-free coroutine to list messages in a Maildir.
+//! I/O-free coroutine to list message entries in a Maildir.
+//!
+//! Scans both `/new` and `/cur`, confirms each candidate is a regular
+//! file, and returns lightweight [`MaildirEntry`]s. Contents are not
+//! read; pair with [`MaildirClient::read_entry`] / `read_entries` /
+//! `read_entries_par` to load bodies.
+//!
+//! [`MaildirClient::read_entry`]: crate::client::MaildirClient::read_entry
 
 use core::mem;
 
-use alloc::{
-    collections::{BTreeMap, BTreeSet},
-    vec::Vec,
-};
+use alloc::collections::{BTreeMap, BTreeSet};
 
 use log::trace;
 use thiserror::Error;
 
-use crate::{maildir::Maildir, message::Message, path::MaildirPath};
+use crate::{entry::MaildirEntry, maildir::Maildir, path::MaildirPath};
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Clone, Debug, Error)]
@@ -23,7 +27,7 @@ pub enum MaildirMessagesListError {
 #[derive(Clone, Debug)]
 pub enum MaildirMessagesListResult {
     /// The coroutine has successfully terminated its progression.
-    Ok(BTreeSet<Message>),
+    Ok(BTreeSet<MaildirEntry>),
 
     /// The caller must read the entries of the given directories and
     /// feed back [`MaildirMessagesListArg::DirRead`].
@@ -32,10 +36,6 @@ pub enum MaildirMessagesListResult {
     /// The caller must check whether the given paths exist as regular
     /// files and feed back [`MaildirMessagesListArg::FileExists`].
     WantsFileExists(BTreeSet<MaildirPath>),
-
-    /// The caller must read the contents of the given files and feed
-    /// back [`MaildirMessagesListArg::FileRead`].
-    WantsFileRead(BTreeSet<MaildirPath>),
 
     /// The coroutine encountered an error.
     Err(MaildirMessagesListError),
@@ -49,7 +49,6 @@ pub enum State {
     Checking {
         candidates: BTreeSet<MaildirPath>,
     },
-    ReadingFiles,
     #[default]
     Invalid,
 }
@@ -62,22 +61,17 @@ pub enum MaildirMessagesListArg {
 
     /// Response to [`MaildirMessagesListResult::WantsFileExists`].
     FileExists(BTreeMap<MaildirPath, bool>),
-
-    /// Response to [`MaildirMessagesListResult::WantsFileRead`].
-    FileRead(BTreeMap<MaildirPath, Vec<u8>>),
 }
 
-/// I/O-free coroutine to list all messages in a Maildir.
-///
-/// Scans both `/new` and `/cur` in a single batched directory read,
-/// confirms each candidate is a regular file, then reads them.
+/// I/O-free coroutine that returns every confirmed message entry in
+/// a Maildir without reading any body.
 #[derive(Debug)]
 pub struct MaildirMessagesList {
     state: State,
 }
 
 impl MaildirMessagesList {
-    /// Creates a new coroutine that will list all messages in
+    /// Creates a new coroutine that will list every entry in
     /// `maildir`.
     pub fn new(maildir: Maildir) -> Self {
         Self {
@@ -116,7 +110,7 @@ impl MaildirMessagesList {
                 }
 
                 if candidates.is_empty() {
-                    trace!("no candidate messages");
+                    trace!("no candidate entries");
                     return MaildirMessagesListResult::Ok(BTreeSet::new());
                 }
 
@@ -127,27 +121,13 @@ impl MaildirMessagesList {
                 MaildirMessagesListResult::WantsFileExists(probes)
             }
             (State::Checking { candidates }, Some(MaildirMessagesListArg::FileExists(probes))) => {
-                let confirmed: BTreeSet<MaildirPath> = candidates
+                let confirmed: BTreeSet<MaildirEntry> = candidates
                     .into_iter()
                     .filter(|p| probes.get(p).copied().unwrap_or(false))
+                    .map(MaildirEntry::from_path)
                     .collect();
 
-                if confirmed.is_empty() {
-                    trace!("no confirmed messages");
-                    return MaildirMessagesListResult::Ok(BTreeSet::new());
-                }
-
-                trace!("wants read of {} files", confirmed.len());
-                self.state = State::ReadingFiles;
-                MaildirMessagesListResult::WantsFileRead(confirmed)
-            }
-            (State::ReadingFiles, Some(MaildirMessagesListArg::FileRead(contents))) => {
-                let messages = contents
-                    .into_iter()
-                    .map(|(path, contents)| Message::from((path, contents)))
-                    .collect();
-
-                MaildirMessagesListResult::Ok(messages)
+                MaildirMessagesListResult::Ok(confirmed)
             }
             (state, arg) => {
                 let err = MaildirMessagesListError::Invalid(arg, state);

@@ -11,7 +11,7 @@ use alloc::{
     vec::Vec,
 };
 use std::{
-    fs, io, process,
+    fs, io, process, thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -25,9 +25,10 @@ use crate::{
         maildir_list::*, maildir_rename::*, message_copy::*, message_get::*, message_list::*,
         message_locate::*, message_move::*, message_store::*,
     },
-    flag::Flags,
+    entry::MaildirEntry,
+    flag::MaildirFlags,
     maildir::{CUR, Maildir, MaildirSubdir, NEW, TMP},
-    message::Message,
+    message::MaildirMessage,
     path::MaildirPath,
 };
 
@@ -186,7 +187,7 @@ impl MaildirClient {
         }
     }
 
-    // ---- Flags --------------------------------------------------
+    // ---- MaildirFlags --------------------------------------------------
 
     /// Runs [`MaildirFlagsAdd`]: adds `flags` to message `id` in
     /// `maildir`. Messages in `/new` or `/tmp` are left unchanged.
@@ -194,7 +195,7 @@ impl MaildirClient {
         &self,
         maildir: Maildir,
         id: impl ToString,
-        flags: Flags,
+        flags: MaildirFlags,
     ) -> Result<(), MaildirClientError> {
         let mut coroutine = MaildirFlagsAdd::new(maildir, id, flags);
         let mut arg: Option<MaildirFlagsAddArg> = None;
@@ -224,7 +225,7 @@ impl MaildirClient {
         &self,
         maildir: Maildir,
         id: impl ToString,
-        flags: Flags,
+        flags: MaildirFlags,
     ) -> Result<(), MaildirClientError> {
         let mut coroutine = MaildirFlagsRemove::new(maildir, id, flags);
         let mut arg: Option<MaildirFlagsRemoveArg> = None;
@@ -254,7 +255,7 @@ impl MaildirClient {
         &self,
         maildir: Maildir,
         id: impl ToString,
-        flags: Flags,
+        flags: MaildirFlags,
     ) -> Result<(), MaildirClientError> {
         let mut coroutine = MaildirFlagsSet::new(maildir, id, flags);
         let mut arg: Option<MaildirFlagsSetArg> = None;
@@ -286,7 +287,7 @@ impl MaildirClient {
         &self,
         maildir: Maildir,
         id: impl ToString,
-    ) -> Result<(MaildirPath, MaildirSubdir, Flags), MaildirClientError> {
+    ) -> Result<(MaildirPath, MaildirSubdir, MaildirFlags), MaildirClientError> {
         let mut coroutine = MaildirMessageLocate::new(maildir, id);
         let mut arg: Option<MaildirMessageLocateArg> = None;
 
@@ -310,7 +311,11 @@ impl MaildirClient {
 
     /// Runs [`MaildirMessageGet`]: locates message `id` in
     /// `maildir` and reads its contents from disk.
-    pub fn get(&self, maildir: Maildir, id: impl ToString) -> Result<Message, MaildirClientError> {
+    pub fn get(
+        &self,
+        maildir: Maildir,
+        id: impl ToString,
+    ) -> Result<MaildirMessage, MaildirClientError> {
         let mut coroutine = MaildirMessageGet::new(maildir, id);
         let mut arg: Option<MaildirMessageGetArg> = None;
 
@@ -331,27 +336,91 @@ impl MaildirClient {
         }
     }
 
-    /// Runs [`MaildirMessagesList`]: scans both `/new` and `/cur`
-    /// of `maildir` and returns every message it finds.
-    pub fn list_messages(&self, maildir: Maildir) -> Result<BTreeSet<Message>, MaildirClientError> {
+    /// Runs [`MaildirMessagesList`]: scans both `/new` and `/cur` of
+    /// `maildir` and returns every confirmed entry. Bodies are not
+    /// loaded; pair with [`Self::read_entry`] / [`Self::read_entries`]
+    /// / [`Self::read_entries_par`] to read contents.
+    pub fn list_entries(
+        &self,
+        maildir: Maildir,
+    ) -> Result<BTreeSet<MaildirEntry>, MaildirClientError> {
         let mut coroutine = MaildirMessagesList::new(maildir);
         let mut arg: Option<MaildirMessagesListArg> = None;
 
         loop {
             match coroutine.resume(arg.take()) {
-                MaildirMessagesListResult::Ok(messages) => return Ok(messages),
+                MaildirMessagesListResult::Ok(entries) => return Ok(entries),
                 MaildirMessagesListResult::WantsDirRead(paths) => {
                     arg = Some(MaildirMessagesListArg::DirRead(read_dirs(paths)?));
                 }
                 MaildirMessagesListResult::WantsFileExists(paths) => {
                     arg = Some(MaildirMessagesListArg::FileExists(file_exists(paths)));
                 }
-                MaildirMessagesListResult::WantsFileRead(paths) => {
-                    arg = Some(MaildirMessagesListArg::FileRead(read_files(paths)?));
-                }
                 MaildirMessagesListResult::Err(err) => return Err(err.into()),
             }
         }
+    }
+
+    /// Reads the file backing `entry` and returns it as a
+    /// [`MaildirMessage`].
+    pub fn read_entry(&self, entry: &MaildirEntry) -> Result<MaildirMessage, MaildirClientError> {
+        let path = entry.path();
+        trace!("read entry at {path}");
+        let contents = fs::read(path.as_str())?;
+        Ok(MaildirMessage::from((path.clone(), contents)))
+    }
+
+    /// Reads every entry sequentially.
+    ///
+    /// Returns an unordered set: callers that need a specific order
+    /// must sort the result themselves. Use [`Self::read_entries_par`]
+    /// for the parallel variant.
+    pub fn read_entries(
+        &self,
+        entries: &[MaildirEntry],
+    ) -> Result<BTreeSet<MaildirMessage>, MaildirClientError> {
+        entries.iter().map(|entry| self.read_entry(entry)).collect()
+    }
+
+    /// Parallel variant of [`Self::read_entries`] backed by a
+    /// `std::thread::scope` worker pool sized to
+    /// [`thread::available_parallelism`].
+    pub fn read_entries_par(
+        &self,
+        entries: &[MaildirEntry],
+    ) -> Result<BTreeSet<MaildirMessage>, MaildirClientError> {
+        if entries.len() <= 1 {
+            return entries.iter().map(|entry| self.read_entry(entry)).collect();
+        }
+
+        let n_threads = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8)
+            .min(entries.len());
+        let chunk_size = entries.len().div_ceil(n_threads);
+
+        thread::scope(
+            |s| -> Result<BTreeSet<MaildirMessage>, MaildirClientError> {
+                let mut handles = Vec::with_capacity(n_threads);
+
+                for chunk in entries.chunks(chunk_size) {
+                    let this = self;
+                    handles.push(s.spawn(
+                        move || -> Result<Vec<MaildirMessage>, MaildirClientError> {
+                            chunk.iter().map(|entry| this.read_entry(entry)).collect()
+                        },
+                    ));
+                }
+
+                let mut out = BTreeSet::new();
+                for handle in handles {
+                    for msg in handle.join().expect("maildir worker thread panicked")? {
+                        out.insert(msg);
+                    }
+                }
+                Ok(out)
+            },
+        )
     }
 
     /// Runs [`MaildirMessageStore`]: writes `contents` to `tmp`
@@ -362,7 +431,7 @@ impl MaildirClient {
         &self,
         maildir: Maildir,
         subdir: MaildirSubdir,
-        flags: Flags,
+        flags: MaildirFlags,
         contents: Vec<u8>,
     ) -> Result<(String, MaildirPath), MaildirClientError> {
         let mut coroutine = MaildirMessageStore::new(maildir, subdir, flags, contents);

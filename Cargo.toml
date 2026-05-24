@@ -2,7 +2,7 @@
 name = "io-maildir"
 description = "Maildir client library"
 version = "0.0.1"
-authors = ["Clément DOUIN <pimalaya.org@posteo.net>"]
+authors = ["soywod <pimalaya.org@posteo.net>"]
 edition = "2024"
 rust-version = "1.87"
 license = "MIT OR Apache-2.0"

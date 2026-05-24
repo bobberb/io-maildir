@@ -10,12 +10,12 @@ pub static INFORMATIONAL_SUFFIX_SEPARATOR: char = ':';
 pub static INFORMATIONAL_SUFFIX_SEPARATOR: char = ';';
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct Message {
+pub struct MaildirMessage {
     pub(crate) path: MaildirPath,
     pub(crate) contents: Vec<u8>,
 }
 
-impl Message {
+impl MaildirMessage {
     pub fn path(&self) -> &MaildirPath {
         &self.path
     }
@@ -48,19 +48,19 @@ impl Message {
     }
 }
 
-impl From<Message> for Vec<u8> {
-    fn from(msg: Message) -> Self {
+impl From<MaildirMessage> for Vec<u8> {
+    fn from(msg: MaildirMessage) -> Self {
         msg.contents
     }
 }
 
-impl From<(MaildirPath, Vec<u8>)> for Message {
+impl From<(MaildirPath, Vec<u8>)> for MaildirMessage {
     fn from((path, contents): (MaildirPath, Vec<u8>)) -> Self {
         Self { path, contents }
     }
 }
 
-impl Hash for Message {
+impl Hash for MaildirMessage {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.path.hash(state);
     }

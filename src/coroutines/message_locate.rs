@@ -11,7 +11,7 @@ use log::trace;
 use thiserror::Error;
 
 use crate::{
-    flag::Flags,
+    flag::MaildirFlags,
     maildir::{Maildir, MaildirSubdir},
     path::MaildirPath,
 };
@@ -34,7 +34,7 @@ pub enum MaildirMessageLocateResult {
     Ok {
         path: MaildirPath,
         subdir: MaildirSubdir,
-        flags: Flags,
+        flags: MaildirFlags,
     },
 
     /// The caller must check whether the given paths exist as regular
@@ -132,7 +132,7 @@ impl MaildirMessageLocate {
                     return MaildirMessageLocateResult::Ok {
                         path: new_path,
                         subdir: MaildirSubdir::New,
-                        flags: Flags::default(),
+                        flags: MaildirFlags::default(),
                     };
                 }
 
@@ -141,7 +141,7 @@ impl MaildirMessageLocate {
                     return MaildirMessageLocateResult::Ok {
                         path: tmp_path,
                         subdir: MaildirSubdir::Tmp,
-                        flags: Flags::default(),
+                        flags: MaildirFlags::default(),
                     };
                 }
 
@@ -162,7 +162,7 @@ impl MaildirMessageLocate {
                         continue;
                     }
 
-                    let flags = Flags::from(&path);
+                    let flags = MaildirFlags::from(&path);
                     trace!("located {id} in /cur at {path}");
                     return MaildirMessageLocateResult::Ok {
                         path,

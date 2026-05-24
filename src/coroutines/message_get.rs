@@ -11,7 +11,9 @@ use alloc::{
 use log::trace;
 use thiserror::Error;
 
-use crate::{coroutines::message_locate::*, maildir::Maildir, message::Message, path::MaildirPath};
+use crate::{
+    coroutines::message_locate::*, maildir::Maildir, message::MaildirMessage, path::MaildirPath,
+};
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Clone, Debug, Error)]
@@ -27,7 +29,7 @@ pub enum MaildirMessageGetError {
 #[derive(Clone, Debug)]
 pub enum MaildirMessageGetResult {
     /// The coroutine has successfully terminated its progression.
-    Ok(Message),
+    Ok(MaildirMessage),
 
     /// Forwarded from the inner locate coroutine.
     WantsFileExists(BTreeSet<MaildirPath>),
@@ -127,7 +129,7 @@ impl MaildirMessageGet {
                 trace!("read message contents at {path}");
 
                 let contents = map.into_values().next().unwrap_or_default();
-                MaildirMessageGetResult::Ok(Message::from((path, contents)))
+                MaildirMessageGetResult::Ok(MaildirMessage::from((path, contents)))
             }
             (state, arg) => {
                 let err = MaildirMessageGetError::Invalid(arg, state);

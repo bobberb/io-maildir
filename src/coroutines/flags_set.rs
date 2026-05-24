@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::{
     coroutines::message_locate::*,
-    flag::Flags,
+    flag::MaildirFlags,
     maildir::{Maildir, MaildirSubdir},
     message::INFORMATIONAL_SUFFIX_SEPARATOR,
     path::MaildirPath,
@@ -80,13 +80,13 @@ pub enum MaildirFlagsSetArg {
 pub struct MaildirFlagsSet {
     state: State,
     id: String,
-    flags: Flags,
+    flags: MaildirFlags,
 }
 
 impl MaildirFlagsSet {
     /// Creates a new coroutine that will replace the flags of message
     /// `id` in `maildir` with `flags`.
-    pub fn new(maildir: Maildir, id: impl ToString, flags: Flags) -> Self {
+    pub fn new(maildir: Maildir, id: impl ToString, flags: MaildirFlags) -> Self {
         let id = id.to_string();
         Self {
             state: State::Locate(MaildirMessageLocate::new(maildir, &id)),
@@ -150,7 +150,7 @@ impl MaildirFlagsSet {
     }
 }
 
-fn rename_with_flags(path: &MaildirPath, id: &str, flags: &Flags) -> MaildirPath {
+fn rename_with_flags(path: &MaildirPath, id: &str, flags: &MaildirFlags) -> MaildirPath {
     let mut name = String::from(id);
     name.push(INFORMATIONAL_SUFFIX_SEPARATOR);
     name.push_str("2,");

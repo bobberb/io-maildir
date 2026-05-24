@@ -6,7 +6,9 @@
 //! cargo run --example std_store_message
 //! ```
 
-use io_maildir::{client::MaildirClient, flag::Flags, maildir::MaildirSubdir, path::MaildirPath};
+use io_maildir::{
+    client::MaildirClient, flag::MaildirFlags, maildir::MaildirSubdir, path::MaildirPath,
+};
 use tempfile::tempdir;
 
 fn main() {
@@ -23,7 +25,12 @@ fn main() {
     let contents = b"From: alice@example.com\r\nTo: bob@example.com\r\nSubject: Hello\r\n\r\nHello, world!\r\n".to_vec();
 
     let (id, path) = client
-        .store(maildir, MaildirSubdir::New, Flags::default(), contents)
+        .store(
+            maildir,
+            MaildirSubdir::New,
+            MaildirFlags::default(),
+            contents,
+        )
         .unwrap();
 
     println!("Stored message:");

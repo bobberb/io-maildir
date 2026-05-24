@@ -15,7 +15,7 @@ use log::trace;
 use thiserror::Error;
 
 use crate::{
-    flag::Flags,
+    flag::MaildirFlags,
     maildir::{Maildir, MaildirSubdir},
     message::INFORMATIONAL_SUFFIX_SEPARATOR,
     path::MaildirPath,
@@ -68,19 +68,19 @@ pub enum State {
     Start {
         maildir: Maildir,
         subdir: MaildirSubdir,
-        flags: Flags,
+        flags: MaildirFlags,
         contents: Vec<u8>,
     },
     AwaitingTime {
         maildir: Maildir,
         subdir: MaildirSubdir,
-        flags: Flags,
+        flags: MaildirFlags,
         contents: Vec<u8>,
     },
     AwaitingPid {
         maildir: Maildir,
         subdir: MaildirSubdir,
-        flags: Flags,
+        flags: MaildirFlags,
         contents: Vec<u8>,
         secs: u64,
         nanos: u32,
@@ -88,7 +88,7 @@ pub enum State {
     AwaitingHostname {
         maildir: Maildir,
         subdir: MaildirSubdir,
-        flags: Flags,
+        flags: MaildirFlags,
         contents: Vec<u8>,
         secs: u64,
         nanos: u32,
@@ -139,7 +139,12 @@ pub struct MaildirMessageStore {
 impl MaildirMessageStore {
     /// Creates a new coroutine that will store `contents` as a new
     /// message in `maildir` under `subdir` with the given `flags`.
-    pub fn new(maildir: Maildir, subdir: MaildirSubdir, flags: Flags, contents: Vec<u8>) -> Self {
+    pub fn new(
+        maildir: Maildir,
+        subdir: MaildirSubdir,
+        flags: MaildirFlags,
+        contents: Vec<u8>,
+    ) -> Self {
         Self {
             state: State::Start {
                 maildir,

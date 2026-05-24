@@ -10,6 +10,7 @@ extern crate std;
 #[cfg(feature = "client")]
 pub mod client;
 pub mod coroutines;
+pub mod entry;
 pub mod flag;
 pub mod maildir;
 pub mod message;
