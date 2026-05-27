@@ -21,12 +21,12 @@ use thiserror::Error;
 
 use crate::{
     coroutines::{
-        flags_add::*, flags_remove::*, flags_set::*, maildir_create::*, maildir_delete::*,
-        maildir_list::*, maildir_rename::*, message_copy::*, message_get::*, message_list::*,
-        message_locate::*, message_move::*, message_store::*,
+        dovecot_load::*, dovecot_store::*, flags_add::*, flags_remove::*, flags_set::*,
+        maildir_create::*, maildir_delete::*, maildir_list::*, maildir_rename::*, message_copy::*,
+        message_get::*, message_list::*, message_locate::*, message_move::*, message_store::*,
     },
     entry::MaildirEntry,
-    flag::MaildirFlags,
+    flag::{KeywordHeader, MaildirFlags},
     maildir::{CUR, Maildir, MaildirSubdir, NEW, TMP},
     message::MaildirMessage,
     path::MaildirPath,
@@ -37,6 +37,11 @@ use crate::{
 pub enum MaildirClientError {
     #[error(transparent)]
     LoadMaildir(#[from] LoadMaildirError),
+
+    #[error(transparent)]
+    DovecotLoad(#[from] DovecotLoadError),
+    #[error(transparent)]
+    DovecotStore(#[from] DovecotStoreError),
 
     #[error(transparent)]
     FlagsAdd(#[from] MaildirFlagsAddError),
@@ -82,21 +87,100 @@ pub enum LoadMaildirError {
 }
 
 /// Std-blocking Maildir client wrapping a filesystem root.
+///
+/// The four `pub` knobs customise how the client interprets and
+/// serialises non-standard flag metadata (custom keywords) and folder
+/// naming. Defaults preserve strict Maildir semantics: no
+/// `dovecot-keywords` resolution, no header round-trip, no header
+/// stripping and a flat namespace.
 #[derive(Debug)]
 pub struct MaildirClient {
     root: MaildirPath,
+    /// Resolve / persist custom keywords via the `dovecot-keywords`
+    /// file at each folder root (Dovecot / mbsync convention).
+    pub dovecot_keywords: bool,
+    /// Mirror custom keywords into a body header (`X-Keywords` or
+    /// `X-Label`) on read, and inject them on write.
+    pub keywords_header: Option<KeywordHeader>,
+    /// Header names to remove from message bytes on read.
+    pub strip_headers: Vec<String>,
+    /// Treat the root as a Maildir++ store: enumerate dotted folder
+    /// siblings and translate logical `Work/Foo` ↔ physical
+    /// `.Work.Foo`.
+    pub maildir_plus: bool,
+    /// Logical name reported for the root Maildir in Maildir++ mode
+    /// (the inbox). Defaults to `INBOX`. Ignored when `maildir_plus`
+    /// is `false`.
+    pub maildirpp_inbox: String,
+    /// Treat the root as a Dovecot fs-layout store: subfolders are
+    /// stored as nested filesystem directories (`Work/Foo/`) instead
+    /// of flat dotted siblings. Mutually exclusive with `maildir_plus`.
+    pub fs_layout: bool,
 }
 
 impl MaildirClient {
     /// Builds a client rooted at `root`. No filesystem check is
     /// performed at construction time.
     pub fn new(root: impl Into<MaildirPath>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            dovecot_keywords: false,
+            keywords_header: None,
+            strip_headers: Vec::new(),
+            maildir_plus: false,
+            maildirpp_inbox: String::from("INBOX"),
+            fs_layout: false,
+        }
     }
 
     /// Returns the filesystem root this client operates on.
     pub fn root(&self) -> &MaildirPath {
         &self.root
+    }
+
+    /// Runs [`DovecotLoad`] for `maildir`, returning the slot table
+    /// when the `dovecot-keywords` file is present and an empty table
+    /// otherwise.
+    pub fn load_dovecot_keywords(
+        &self,
+        maildir: &Maildir,
+    ) -> Result<BTreeMap<char, String>, MaildirClientError> {
+        let mut coroutine = DovecotLoad::new(maildir);
+        let mut arg: Option<DovecotLoadArg> = None;
+
+        loop {
+            match coroutine.resume(arg.take()) {
+                DovecotLoadResult::Ok(table) => return Ok(table),
+                DovecotLoadResult::WantsFileExists(paths) => {
+                    arg = Some(DovecotLoadArg::FileExists(file_exists(paths)));
+                }
+                DovecotLoadResult::WantsFileRead(paths) => {
+                    arg = Some(DovecotLoadArg::FileRead(read_files(paths)?));
+                }
+                DovecotLoadResult::Err(err) => return Err(err.into()),
+            }
+        }
+    }
+
+    /// Runs [`DovecotStore`] for `maildir` with the given table.
+    pub fn store_dovecot_keywords(
+        &self,
+        maildir: &Maildir,
+        table: &BTreeMap<char, String>,
+    ) -> Result<(), MaildirClientError> {
+        let mut coroutine = DovecotStore::new(maildir, table);
+        let mut arg: Option<DovecotStoreArg> = None;
+
+        loop {
+            match coroutine.resume(arg.take()) {
+                DovecotStoreResult::Ok => return Ok(()),
+                DovecotStoreResult::WantsFileCreate(files) => {
+                    write_files(files)?;
+                    arg = Some(DovecotStoreArg::FileCreate);
+                }
+                DovecotStoreResult::Err(err) => return Err(err.into()),
+            }
+        }
     }
 
     /// Opens an existing Maildir at `path`, validating that
@@ -147,8 +231,14 @@ impl MaildirClient {
 
     /// Runs [`MaildirList`]: lists every valid Maildir directly
     /// under [`self.root`](Self::root).
+    ///
+    /// Dotted (`.`-prefixed) siblings are surfaced when
+    /// [`Self::maildir_plus`] is set; the root itself is also probed
+    /// in that mode so the inbox shows up alongside its children.
     pub fn list_maildirs(&self) -> Result<BTreeSet<Maildir>, MaildirClientError> {
-        let mut coroutine = MaildirList::new(self.root.clone());
+        let mut coroutine = MaildirList::new(self.root.clone())
+            .include_dotted(self.maildir_plus)
+            .include_root(self.maildir_plus);
         let mut arg: Option<MaildirListArg> = None;
 
         loop {
@@ -191,12 +281,19 @@ impl MaildirClient {
 
     /// Runs [`MaildirFlagsAdd`]: adds `flags` to message `id` in
     /// `maildir`. Messages in `/new` or `/tmp` are left unchanged.
+    ///
+    /// When [`Self::dovecot_keywords`] is enabled, every
+    /// [`MaildirFlag::Keyword`](crate::flag::MaildirFlag::Keyword) is
+    /// resolved against the per-folder slot table (allocating a fresh
+    /// slot when needed) and the resulting letter is appended to the
+    /// filename. Otherwise, keyword variants are silently dropped.
     pub fn add_flags(
         &self,
         maildir: Maildir,
         id: impl ToString,
-        flags: MaildirFlags,
+        mut flags: MaildirFlags,
     ) -> Result<(), MaildirClientError> {
+        self.resolve_keywords(&maildir, &mut flags)?;
         let mut coroutine = MaildirFlagsAdd::new(maildir, id, flags);
         let mut arg: Option<MaildirFlagsAddArg> = None;
 
@@ -221,12 +318,17 @@ impl MaildirClient {
     /// Runs [`MaildirFlagsRemove`]: removes `flags` from message
     /// `id` in `maildir`. Messages in `/new` or `/tmp` are left
     /// unchanged.
+    ///
+    /// Keyword variants are resolved through the per-folder dovecot
+    /// table (when [`Self::dovecot_keywords`] is set) so that already
+    /// stored slot letters can be cleared.
     pub fn remove_flags(
         &self,
         maildir: Maildir,
         id: impl ToString,
-        flags: MaildirFlags,
+        mut flags: MaildirFlags,
     ) -> Result<(), MaildirClientError> {
+        self.resolve_keywords(&maildir, &mut flags)?;
         let mut coroutine = MaildirFlagsRemove::new(maildir, id, flags);
         let mut arg: Option<MaildirFlagsRemoveArg> = None;
 
@@ -251,12 +353,16 @@ impl MaildirClient {
     /// Runs [`MaildirFlagsSet`]: replaces the flags of message `id`
     /// in `maildir` with `flags`. Messages in `/new` or `/tmp` are
     /// left unchanged.
+    ///
+    /// Keyword variants are resolved through the per-folder dovecot
+    /// table when [`Self::dovecot_keywords`] is set.
     pub fn set_flags(
         &self,
         maildir: Maildir,
         id: impl ToString,
-        flags: MaildirFlags,
+        mut flags: MaildirFlags,
     ) -> Result<(), MaildirClientError> {
+        self.resolve_keywords(&maildir, &mut flags)?;
         let mut coroutine = MaildirFlagsSet::new(maildir, id, flags);
         let mut arg: Option<MaildirFlagsSetArg> = None;
 
@@ -363,10 +469,20 @@ impl MaildirClient {
 
     /// Reads the file backing `entry` and returns it as a
     /// [`MaildirMessage`].
+    ///
+    /// When [`Self::strip_headers`] is non-empty, the listed headers
+    /// are removed from the returned bytes via
+    /// [`crate::headers::strip_headers`].
     pub fn read_entry(&self, entry: &MaildirEntry) -> Result<MaildirMessage, MaildirClientError> {
         let path = entry.path();
         trace!("read entry at {path}");
         let contents = fs::read(path.as_str())?;
+        let contents = if self.strip_headers.is_empty() {
+            contents
+        } else {
+            let names: Vec<&str> = self.strip_headers.iter().map(String::as_str).collect();
+            crate::headers::strip_headers(&contents, &names)
+        };
         Ok(MaildirMessage::from((path.clone(), contents)))
     }
 
@@ -427,13 +543,59 @@ impl MaildirClient {
     /// then atomically renames it under `subdir` of `maildir` with
     /// the given `flags`. Returns the generated message id and
     /// final path.
+    ///
+    /// Behaviour adjustments controlled by [`Self::keywords_header`]
+    /// and [`Self::dovecot_keywords`]:
+    /// 1. when [`Self::keywords_header`] is `Some`, every
+    ///    [`MaildirFlag::Keyword`](crate::flag::MaildirFlag::Keyword)
+    ///    is injected into `contents` as a single header line;
+    /// 2. when [`Self::dovecot_keywords`] is `true`, the per-folder
+    ///    table is loaded, slots are allocated for the keywords (with
+    ///    a `warn!` and drop on 26-slot overflow), the resulting
+    ///    letters are appended to the filename info section and the
+    ///    grown table is persisted.
     pub fn store(
         &self,
         maildir: Maildir,
         subdir: MaildirSubdir,
-        flags: MaildirFlags,
-        contents: Vec<u8>,
+        mut flags: MaildirFlags,
+        mut contents: Vec<u8>,
     ) -> Result<(String, MaildirPath), MaildirClientError> {
+        let keywords = flags.drain_keywords();
+
+        if let Some(header) = self.keywords_header {
+            if !keywords.is_empty() {
+                let sep = match header.separator() {
+                    ',' => ", ",
+                    ' ' => " ",
+                    _ => ", ",
+                };
+                let value = keywords.join(sep);
+                contents = crate::headers::inject_header(&contents, header.header_name(), &value);
+            }
+        }
+
+        if self.dovecot_keywords && !keywords.is_empty() {
+            let mut table = self.load_dovecot_keywords(&maildir)?;
+            let original_len = table.len();
+            for keyword in &keywords {
+                match crate::headers::allocate_keyword_slot(&mut table, keyword) {
+                    Some(letter) => {
+                        flags.extend_letters([letter]);
+                    }
+                    None => {
+                        log::warn!(
+                            "dovecot-keywords table full; dropping keyword `{keyword}` at {}",
+                            maildir.path()
+                        );
+                    }
+                }
+            }
+            if table.len() != original_len {
+                self.store_dovecot_keywords(&maildir, &table)?;
+            }
+        }
+
         let mut coroutine = MaildirMessageStore::new(maildir, subdir, flags, contents);
         let mut arg: Option<MaildirMessageStoreArg> = None;
 
@@ -495,6 +657,46 @@ impl MaildirClient {
                 MaildirMessageCopyResult::Err(err) => return Err(err.into()),
             }
         }
+    }
+
+    /// Projects every [`MaildirFlag::Keyword`] out of `flags`,
+    /// allocates a slot for it in the dovecot-keywords table (when
+    /// [`Self::dovecot_keywords`] is set) and appends the slot letter
+    /// to the filename. Keyword variants are dropped otherwise.
+    ///
+    /// [`MaildirFlag::Keyword`]: crate::flag::MaildirFlag::Keyword
+    fn resolve_keywords(
+        &self,
+        maildir: &Maildir,
+        flags: &mut MaildirFlags,
+    ) -> Result<(), MaildirClientError> {
+        let keywords = flags.drain_keywords();
+        if !self.dovecot_keywords || keywords.is_empty() {
+            return Ok(());
+        }
+
+        let mut table = self.load_dovecot_keywords(maildir)?;
+        let original_len = table.len();
+
+        for keyword in &keywords {
+            match crate::headers::allocate_keyword_slot(&mut table, keyword) {
+                Some(letter) => {
+                    flags.extend_letters([letter]);
+                }
+                None => {
+                    log::warn!(
+                        "dovecot-keywords table full; dropping keyword `{keyword}` at {}",
+                        maildir.path()
+                    );
+                }
+            }
+        }
+
+        if table.len() != original_len {
+            self.store_dovecot_keywords(maildir, &table)?;
+        }
+
+        Ok(())
     }
 
     /// Runs [`MaildirMessageMove`]: moves message `id` from

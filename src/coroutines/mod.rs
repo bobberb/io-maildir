@@ -7,6 +7,8 @@
 //! feeds the corresponding `*Arg` variant back into the next
 //! `resume` call to make progress.
 
+pub mod dovecot_load;
+pub mod dovecot_store;
 pub mod flags_add;
 pub mod flags_remove;
 pub mod flags_set;

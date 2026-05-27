@@ -12,6 +12,7 @@ pub mod client;
 pub mod coroutines;
 pub mod entry;
 pub mod flag;
+pub mod headers;
 pub mod maildir;
 pub mod message;
 pub mod path;

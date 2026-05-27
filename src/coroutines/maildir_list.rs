@@ -64,12 +64,16 @@ pub enum MaildirListArg {
 /// I/O-free coroutine to list all valid Maildirs inside a root
 /// directory.
 ///
-/// Entries starting with `.` are skipped. A child is reported as a
-/// Maildir when it contains all three of `cur`, `new` and `tmp` as
-/// subdirectories.
+/// By default, entries starting with `.` are skipped. Set
+/// [`Self::include_dotted`] to include them (required by Maildir++
+/// where folders are stored as dotted siblings like `.Work.Foo`). A
+/// child is reported as a Maildir when it contains all three of
+/// `cur`, `new` and `tmp` as subdirectories.
 #[derive(Debug)]
 pub struct MaildirList {
     state: State,
+    include_dotted: bool,
+    include_root: bool,
 }
 
 impl MaildirList {
@@ -77,7 +81,26 @@ impl MaildirList {
     pub fn new(root: impl Into<MaildirPath>) -> Self {
         Self {
             state: State::Start(root.into()),
+            include_dotted: false,
+            include_root: false,
         }
+    }
+
+    /// Configures the coroutine to surface dotted (`.`-prefixed)
+    /// folders during enumeration. Required for Maildir++ where
+    /// folders live as siblings of the root with a leading dot.
+    pub fn include_dotted(mut self, include: bool) -> Self {
+        self.include_dotted = include;
+        self
+    }
+
+    /// Configures the coroutine to also probe the root directory
+    /// itself for `cur`/`new`/`tmp`. Required for Maildir++ where
+    /// the root is the inbox; not reported by default to preserve
+    /// historical "children only" semantics.
+    pub fn include_root(mut self, include: bool) -> Self {
+        self.include_root = include;
+        self
     }
 
     /// Makes the listing progress.
@@ -93,13 +116,19 @@ impl MaildirList {
             (State::Start(_), Some(MaildirListArg::DirRead(entries))) => {
                 let mut markers = BTreeMap::new();
 
-                for (_dir, names) in entries {
+                for (dir, names) in entries {
+                    if self.include_root {
+                        markers.insert(dir.join(CUR), dir.clone());
+                        markers.insert(dir.join(NEW), dir.clone());
+                        markers.insert(dir.join(TMP), dir.clone());
+                    }
+
                     for path in names {
                         let Some(name) = path.file_name() else {
                             continue;
                         };
 
-                        if name.starts_with('.') {
+                        if !self.include_dotted && name.starts_with('.') {
                             continue;
                         }
 
