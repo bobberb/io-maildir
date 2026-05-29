@@ -1,30 +1,40 @@
 # I/O Maildir [![Documentation](https://img.shields.io/docsrs/io-maildir?style=flat&logo=docs.rs&logoColor=white)](https://docs.rs/io-maildir/latest/io_maildir) [![Matrix](https://img.shields.io/badge/chat-%23pimalaya-blue?style=flat&logo=matrix&logoColor=white)](https://matrix.to/#/#pimalaya:matrix.org) [![Mastodon](https://img.shields.io/badge/news-%40pimalaya-blue?style=flat&logo=mastodon&logoColor=white)](https://fosstodon.org/@pimalaya)
 
-Maildir client library, written in Rust
+Maildir client library, written in Rust.
+
+This library is composed of 2 feature-gated layers:
+
+- Low-level **I/O-free** coroutines: these `no_std`-compatible state machines contain the whole Maildir logic and can be used anywhere
+- Mid-level **std client**: a standard, blocking Maildir client built on `std::fs`
 
 ## Table of contents
 
 - [Features](#features)
 - [Specification coverage](#specification-coverage)
+- [Usage](#usage)
+  - [I/O-free coroutines](#io-free-coroutines)
+  - [Std client](#std-client)
 - [Examples](#examples)
-  - [As a coroutine library](#as-a-coroutine-library)
-  - [As a std client](#as-a-std-client)
-- [More examples](#more-examples)
+- [AI disclosure](#ai-disclosure)
 - [License](#license)
 - [Social](#social)
 - [Sponsoring](#sponsoring)
 
 ## Features
 
-- **I/O-free** coroutines: every Maildir operation is exposed as a `resume(arg)` state machine. No filesystem calls, no async runtime. Drive against any blocking, async, or fuzz harness.
-- **Standard, blocking client** (requires `client` feature): `MaildirClient::new(root)` wraps a filesystem root and exposes one method per coroutine; the resume loop is run for you via [`std::fs`].
+- **I/O-free** coroutines: `no_std` state machines; no filesystem calls, no async runtime, no `std` required, drive against any blocking, async, or fuzz harness.
+- Standard, blocking client (requires `client` feature) backed by `std::fs`.
 - **Maildir delivery protocol**: the message-store coroutine writes to `/tmp` first, then atomically renames into `/cur` or `/new`, producing IDs of the shape `secs.#counter.M<nanos>P<pid>.<host>`.
+- **Maildir++** mode: optional dotted folder enumeration (`.Work.Foo`) and inbox surfacing, gated by the `maildir_plus` client knob.
+- **Dovecot keywords** resolution: read / write the `dovecot-keywords` slot table (`a..z` letters), gated by the `dovecot_keywords` client knob.
+- **Header round-trip** for custom keywords: inject and strip `X-Keywords` / `X-Label` headers, gated by `keywords_header` and `strip_headers`.
 
-*The `io-maildir` library is written in [Rust](https://www.rust-lang.org/), and relies on [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to enable or disable functionalities. Default features can be found in the `features` section of the [`Cargo.toml`](https://github.com/pimalaya/io-maildir/blob/master/Cargo.toml), or on [docs.rs](https://docs.rs/crate/io-maildir/latest/features).*
+> [!TIP]
+> I/O Maildir is written in [Rust](https://www.rust-lang.org/) and uses [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to gate backend support. The default feature set is declared in [Cargo.toml](./Cargo.toml) or on [docs.rs](https://docs.rs/crate/io-maildir/latest/features).
 
 ## Specification coverage
 
-This library implements the [Maildir](https://en.wikipedia.org/wiki/Maildir) format as I/O-agnostic coroutines: no filesystem calls, no async runtime.
+This library implements the [Maildir](https://en.wikipedia.org/wiki/Maildir) format as I/O-agnostic coroutines.
 
 | Coroutine             | What it does                                                                                                |
 |-----------------------|-------------------------------------------------------------------------------------------------------------|
@@ -34,34 +44,37 @@ This library implements the [Maildir](https://en.wikipedia.org/wiki/Maildir) for
 | `MaildirList`         | Lists every valid Maildir inside a root directory                                                           |
 | `MaildirMessageStore` | Writes to `/tmp`, then atomically renames into `/cur` or `/new` with optional flags                         |
 | `MaildirMessageGet`   | Locates a message by ID and reads its contents                                                              |
-| `MaildirMessagesList` | Scans both `/new` and `/cur` and returns every message it finds                                             |
+| `MaildirMessagesList` | Scans both `/new` and `/cur` and returns every confirmed entry                                              |
 | `MaildirMessageCopy`  | Copies a message between Maildirs                                                                           |
 | `MaildirMessageMove`  | Moves a message between Maildirs                                                                            |
 | `MaildirMessageLocate`| Finds a message file by ID across `cur`, `new` and `tmp`                                                    |
 | `MaildirFlagsAdd`     | Adds flags to a message in `/cur` (no-op for `/new` and `/tmp`)                                             |
 | `MaildirFlagsRemove`  | Removes flags from a message in `/cur` (no-op for `/new` and `/tmp`)                                        |
 | `MaildirFlagsSet`     | Replaces the flags of a message in `/cur` (no-op for `/new` and `/tmp`)                                     |
+| `DovecotLoad`         | Reads the per-folder `dovecot-keywords` slot table                                                          |
+| `DovecotStore`        | Writes a per-folder `dovecot-keywords` slot table                                                           |
 
-## Examples
+## Usage
 
-`io-maildir` can be consumed two ways, depending on how much of the I/O stack you want to own. Each mode is gated by cargo features.
+I/O Maildir can be consumed two ways, depending on how much of the I/O stack you want to own. Each mode is gated by cargo features.
 
-Whichever mode you pick, every coroutine exposes `resume(arg)` returning a result enum with four shapes:
+Whichever mode you pick, every coroutine implements the `MaildirCoroutine` trait. Its `resume(arg: Option<Arg>)` method returns `MaildirCoroutineState<Output, Error>` with three terminal shapes plus filesystem (and environment) request variants:
 
-- `WantsDirRead`, `WantsDirCreate`, `WantsDirRemove`, `WantsFileRead`, `WantsFileCreate`, `WantsRename`, `WantsCopy`: caller performs the matching filesystem operation and feeds back the corresponding `*Arg` variant.
-- `Ok { … }` / `Ok(…)` / `Ok`: terminal success.
-- `Err(…)`: terminal failure.
+- `WantsTime`, `WantsPid`, `WantsHostname`: caller supplies the current Unix time, process id, or host name. Used by the message-store coroutine to mint IDs.
+- `WantsDirCreate`, `WantsDirRead`, `WantsDirRemove`, `WantsDirExists`, `WantsFileCreate`, `WantsFileRead`, `WantsFileExists`, `WantsRename`, `WantsCopy`: caller performs the matching filesystem operation and feeds back the corresponding `Arg::*` variant.
+- `Done(Output)`: terminal success carrying the coroutine's `Output` payload.
+- `Err(Error)`: terminal failure.
 
-### As a coroutine library
+### I/O-free coroutines
 
-No features required: works without [`std::fs`] and without an async runtime. You own the loop and the syscalls; the library only computes the operations to perform and consumes their results.
+No features required: works in `#![no_std]`, no filesystem calls, no async runtime. You own the loop and the syscalls; the library only computes the operations to perform and consumes their results.
 
 Create a fresh Maildir against a blocking caller (the same shape works under async or in-memory replay):
 
 ```rust,ignore
 use std::fs;
 
-use io_maildir::{coroutines::maildir_create::*, path::MaildirPath};
+use io_maildir::{coroutine::*, coroutines::maildir_create::*, path::MaildirPath};
 
 let root = MaildirPath::new("/path/to/maildir");
 
@@ -70,14 +83,15 @@ let mut arg: Option<MaildirCreateArg> = None;
 
 loop {
     match coroutine.resume(arg.take()) {
-        MaildirCreateResult::Ok => break,
-        MaildirCreateResult::WantsDirCreate(paths) => {
+        MaildirCoroutineState::Done(()) => break,
+        MaildirCoroutineState::WantsDirCreate(paths) => {
             for path in paths {
                 fs::create_dir_all(path.as_str()).unwrap();
             }
             arg = Some(MaildirCreateArg::DirCreate);
         }
-        MaildirCreateResult::Err(err) => panic!("{err}"),
+        MaildirCoroutineState::Err(err) => panic!("{err}"),
+        other => unreachable!("MaildirCreate yielded {other:?}"),
     }
 }
 ```
@@ -92,8 +106,9 @@ use std::{
 
 use gethostname::gethostname;
 use io_maildir::{
+    coroutine::*,
     coroutines::message_store::*,
-    flag::Flags,
+    flag::MaildirFlags,
     maildir::{Maildir, MaildirSubdir},
     path::MaildirPath,
 };
@@ -101,49 +116,45 @@ use io_maildir::{
 let maildir = Maildir::from_path(MaildirPath::new("/path/to/maildir"));
 let contents = b"From: alice@example.com\r\nSubject: Hello\r\n\r\nHello!\r\n".to_vec();
 
-let mut coroutine = MaildirMessageStore::new(
-    maildir,
-    MaildirSubdir::New,
-    Flags::default(),
-    contents,
-);
+let mut coroutine = MaildirMessageStore::new(maildir, MaildirSubdir::New, MaildirFlags::default(), contents);
 let mut arg: Option<MaildirMessageStoreArg> = None;
 
-let (id, path) = loop {
+let MaildirMessageStoreOk { id, path } = loop {
     match coroutine.resume(arg.take()) {
-        MaildirMessageStoreResult::Ok { id, path } => break (id, path),
-        MaildirMessageStoreResult::WantsTime => {
+        MaildirCoroutineState::Done(ok) => break ok,
+        MaildirCoroutineState::WantsTime => {
             let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
             arg = Some(MaildirMessageStoreArg::Time { secs: ts.as_secs(), nanos: ts.subsec_nanos() });
         }
-        MaildirMessageStoreResult::WantsPid => {
+        MaildirCoroutineState::WantsPid => {
             arg = Some(MaildirMessageStoreArg::Pid(process::id()));
         }
-        MaildirMessageStoreResult::WantsHostname => {
+        MaildirCoroutineState::WantsHostname => {
             arg = Some(MaildirMessageStoreArg::Hostname(gethostname().into_string().unwrap_or_default()));
         }
-        MaildirMessageStoreResult::WantsFileCreate(files) => {
+        MaildirCoroutineState::WantsFileCreate(files) => {
             for (path, bytes) in files {
                 fs::write(path.as_str(), &bytes).unwrap();
             }
             arg = Some(MaildirMessageStoreArg::FileCreate);
         }
-        MaildirMessageStoreResult::WantsRename(pairs) => {
+        MaildirCoroutineState::WantsRename(pairs) => {
             for (from, to) in pairs {
                 fs::rename(from.as_str(), to.as_str()).unwrap();
             }
             arg = Some(MaildirMessageStoreArg::Rename);
         }
-        MaildirMessageStoreResult::Err(err) => panic!("{err}"),
+        MaildirCoroutineState::Err(err) => panic!("{err}"),
+        other => unreachable!("MaildirMessageStore yielded {other:?}"),
     }
 };
 
 println!("stored {id} at {path}");
 ```
 
-### As a std client
+### Std client
 
-Enable the `client` feature (on by default). `MaildirClient::new(root)` wraps a filesystem root and exposes one method per coroutine, driving the resume loop for you via [`std::fs`].
+Enable the `client` feature (on by default). `MaildirClient::new(root)` wraps a filesystem root and exposes one method per coroutine; the resume loop is driven for you via `MaildirClient::run` and `std::fs`.
 
 ```toml,ignore
 [dependencies]
@@ -151,7 +162,7 @@ io-maildir = "0.0.1" # client is enabled by default
 ```
 
 ```rust,ignore
-use io_maildir::{client::MaildirClient, flag::Flags, maildir::MaildirSubdir};
+use io_maildir::{client::MaildirClient, flag::MaildirFlags, maildir::MaildirSubdir};
 
 let client = MaildirClient::new("/path/to/root");
 
@@ -159,18 +170,40 @@ client.create_maildir("/path/to/root/inbox")?;
 let maildir = client.load_maildir("/path/to/root/inbox")?;
 
 let contents = b"From: alice@example.com\r\nSubject: Hello\r\n\r\nHello!\r\n".to_vec();
-let (id, path) = client.store(maildir, MaildirSubdir::New, Flags::default(), contents)?;
+let (id, path) = client.store(maildir, MaildirSubdir::New, MaildirFlags::default(), contents)?;
 
 println!("stored {id} at {path}");
 ```
 
-*See complete examples at [./examples](https://github.com/pimalaya/io-maildir/blob/master/examples).*
+## Examples
 
-## More examples
+See complete examples at [./examples](https://github.com/pimalaya/io-maildir/blob/master/examples).
 
-Have a look at projects built on top of this library:
+Have also a look at real-world projects built on top of this library:
 
-- [himalaya](https://github.com/pimalaya/himalaya): CLI to manage emails
+- [Himalaya CLI](https://github.com/pimalaya/himalaya): CLI to manage emails
+- [Himalaya TUI](https://github.com/pimalaya/himalaya-tui): TUI to manage emails
+- [Neverest](https://github.com/pimalaya/neverest): CLI to synchronize emails
+
+## AI disclosure
+
+This project is developed with AI assistance. This section documents how, so users and downstream packagers can make informed decisions.
+
+- **Tools**: Claude Code (Anthropic), Opus 4.7, invoked locally with a persistent project-scoped memory and a small set of repo-specific rules.
+
+- **Used for**: Refactors, mechanical multi-file edits, boilerplate (feature gates, error enums, derive macros, trait impls), test scaffolding, doc polish, exploratory design conversations.
+
+- **Not used for**: Engineering, critical code, git manipulation (commit, merge, rebase…), real-world tests.
+
+- **Verification**: Every AI-assisted change is read, compiled, tested, and formatted before commit (`nix develop --command cargo check / cargo test / cargo
+fmt`). Behavioural correctness is verified against the relevant spec, not assumed from the model output. Tests are never adjusted to fit
+AI-generated code; the code is adjusted to fit correct behaviour.
+
+- **Limitations**: AI models occasionally produce code that compiles and passes tests but is subtly wrong: off-by-one errors, missed edge cases, plausible
+but nonexistent APIs, stale spec references. The verification workflow catches most of this; it does not catch all of it. Bug reports are welcome and taken
+seriously.
+
+- **Last reviewed**: 29/05/2026
 
 ## License
 

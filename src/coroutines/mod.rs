@@ -1,11 +1,15 @@
 //! Collection of I/O-free, resumable and composable Maildir state
 //! machines.
 //!
-//! Each coroutine emits filesystem requests via the `Wants*` variants
-//! of its `*Result` enum (e.g. `WantsDirCreate`, `WantsFileRead`,
-//! `WantsRename`). The caller performs the matching operation and
-//! feeds the corresponding `*Arg` variant back into the next
-//! `resume` call to make progress.
+//! Every coroutine reports progression through the unified
+//! [`MaildirCoroutineState`](crate::coroutine::MaildirCoroutineState)
+//! enum (filesystem-flavoured `Wants*` variants, [`Done`], [`Err`])
+//! and consumes its own per-coroutine `Arg` enum on resume. Drive any
+//! coroutine end-to-end against the local filesystem via
+//! [`MaildirClient::run`](crate::client::MaildirClient::run).
+//!
+//! [`Done`]: crate::coroutine::MaildirCoroutineState::Done
+//! [`Err`]: crate::coroutine::MaildirCoroutineState::Err
 
 pub mod dovecot_load;
 pub mod dovecot_store;

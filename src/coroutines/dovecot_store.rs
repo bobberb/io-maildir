@@ -6,7 +6,9 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use log::trace;
 use thiserror::Error;
 
-use crate::{headers::serialize_dovecot_keywords, maildir::Maildir, path::MaildirPath};
+use crate::{
+    coroutine::*, headers::serialize_dovecot_keywords, maildir::Maildir, path::MaildirPath,
+};
 
 const FILENAME: &str = "dovecot-keywords";
 
@@ -14,13 +16,6 @@ const FILENAME: &str = "dovecot-keywords";
 pub enum DovecotStoreError {
     #[error("invalid dovecot store arg: {0:?}")]
     Invalid(Option<DovecotStoreArg>),
-}
-
-#[derive(Debug)]
-pub enum DovecotStoreResult {
-    Ok,
-    WantsFileCreate(BTreeMap<MaildirPath, Vec<u8>>),
-    Err(DovecotStoreError),
 }
 
 #[derive(Clone, Debug)]
@@ -54,8 +49,17 @@ impl DovecotStore {
             state: State::Pending,
         }
     }
+}
 
-    pub fn resume(&mut self, arg: Option<DovecotStoreArg>) -> DovecotStoreResult {
+impl MaildirCoroutine for DovecotStore {
+    type Arg = DovecotStoreArg;
+    type Output = ();
+    type Error = DovecotStoreError;
+
+    fn resume(
+        &mut self,
+        arg: Option<Self::Arg>,
+    ) -> MaildirCoroutineState<Self::Output, Self::Error> {
         match (&self.state, arg, self.payload.take()) {
             (State::Pending, None, Some(payload)) => {
                 trace!(
@@ -66,13 +70,13 @@ impl DovecotStore {
                 let mut map = BTreeMap::new();
                 map.insert(self.path.clone(), payload);
                 self.state = State::Awaiting;
-                DovecotStoreResult::WantsFileCreate(map)
+                MaildirCoroutineState::WantsFileCreate(map)
             }
             (State::Awaiting, Some(DovecotStoreArg::FileCreate), _) => {
                 self.state = State::Done;
-                DovecotStoreResult::Ok
+                MaildirCoroutineState::Done(())
             }
-            (_, arg, _) => DovecotStoreResult::Err(DovecotStoreError::Invalid(arg)),
+            (_, arg, _) => MaildirCoroutineState::Err(DovecotStoreError::Invalid(arg)),
         }
     }
 }

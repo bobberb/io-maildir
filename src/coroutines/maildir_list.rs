@@ -8,6 +8,7 @@ use log::trace;
 use thiserror::Error;
 
 use crate::{
+    coroutine::*,
     maildir::{CUR, Maildir, NEW, TMP},
     path::MaildirPath,
 };
@@ -17,24 +18,6 @@ use crate::{
 pub enum MaildirListError {
     #[error("invalid Maildir list arg {0:?} for state {1:?}")]
     Invalid(Option<MaildirListArg>, State),
-}
-
-/// Result returned by [`MaildirList::resume`].
-#[derive(Clone, Debug)]
-pub enum MaildirListResult {
-    /// The coroutine has successfully terminated its progression.
-    Ok(BTreeSet<Maildir>),
-
-    /// The caller must read the entries of the given directories and
-    /// feed back [`MaildirListArg::DirRead`].
-    WantsDirRead(BTreeSet<MaildirPath>),
-
-    /// The caller must check whether the given paths exist as
-    /// directories and feed back [`MaildirListArg::DirExists`].
-    WantsDirExists(BTreeSet<MaildirPath>),
-
-    /// The coroutine encountered an error.
-    Err(MaildirListError),
 }
 
 /// Internal progression state of [`MaildirList`].
@@ -51,13 +34,13 @@ pub enum State {
     Invalid,
 }
 
-/// Argument fed back to [`MaildirList::resume`].
+/// Argument fed back into [`MaildirList`].
 #[derive(Clone, Debug)]
 pub enum MaildirListArg {
-    /// Response to [`MaildirListResult::WantsDirRead`].
+    /// Response to [`MaildirCoroutineState::WantsDirRead`].
     DirRead(BTreeMap<MaildirPath, BTreeSet<MaildirPath>>),
 
-    /// Response to [`MaildirListResult::WantsDirExists`].
+    /// Response to [`MaildirCoroutineState::WantsDirExists`].
     DirExists(BTreeMap<MaildirPath, bool>),
 }
 
@@ -102,16 +85,24 @@ impl MaildirList {
         self.include_root = include;
         self
     }
+}
 
-    /// Makes the listing progress.
-    pub fn resume(&mut self, arg: Option<impl Into<MaildirListArg>>) -> MaildirListResult {
-        match (mem::take(&mut self.state), arg.map(Into::into)) {
+impl MaildirCoroutine for MaildirList {
+    type Arg = MaildirListArg;
+    type Output = BTreeSet<Maildir>;
+    type Error = MaildirListError;
+
+    fn resume(
+        &mut self,
+        arg: Option<Self::Arg>,
+    ) -> MaildirCoroutineState<Self::Output, Self::Error> {
+        match (mem::take(&mut self.state), arg) {
             (State::Start(root), None) => {
                 trace!("wants read of {root}");
 
                 let paths = BTreeSet::from_iter([root.clone()]);
                 self.state = State::Start(root);
-                MaildirListResult::WantsDirRead(paths)
+                MaildirCoroutineState::WantsDirRead(paths)
             }
             (State::Start(_), Some(MaildirListArg::DirRead(entries))) => {
                 let mut markers = BTreeMap::new();
@@ -140,14 +131,14 @@ impl MaildirList {
 
                 if markers.is_empty() {
                     trace!("no candidate maildirs");
-                    return MaildirListResult::Ok(BTreeSet::new());
+                    return MaildirCoroutineState::Done(BTreeSet::new());
                 }
 
                 let probes: BTreeSet<MaildirPath> = markers.keys().cloned().collect();
                 trace!("wants dir-exists check for {} probes", probes.len());
 
                 self.state = State::CheckingSubdirs { markers };
-                MaildirListResult::WantsDirExists(probes)
+                MaildirCoroutineState::WantsDirExists(probes)
             }
             (State::CheckingSubdirs { markers }, Some(MaildirListArg::DirExists(probes))) => {
                 let mut hits: BTreeMap<MaildirPath, u8> = BTreeMap::new();
@@ -165,11 +156,11 @@ impl MaildirList {
                     .collect();
 
                 trace!("found {} maildirs", found.len());
-                MaildirListResult::Ok(found)
+                MaildirCoroutineState::Done(found)
             }
             (state, arg) => {
                 let err = MaildirListError::Invalid(arg, state);
-                MaildirListResult::Err(err)
+                MaildirCoroutineState::Err(err)
             }
         }
     }

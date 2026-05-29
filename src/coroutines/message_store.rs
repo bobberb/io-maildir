@@ -15,6 +15,7 @@ use log::trace;
 use thiserror::Error;
 
 use crate::{
+    coroutine::*,
     flag::MaildirFlags,
     maildir::{Maildir, MaildirSubdir},
     message::INFORMATIONAL_SUFFIX_SEPARATOR,
@@ -30,36 +31,11 @@ pub enum MaildirMessageStoreError {
     Invalid(Option<MaildirMessageStoreArg>, State),
 }
 
-/// Result returned by [`MaildirMessageStore::resume`].
+/// Successful output of [`MaildirMessageStore`].
 #[derive(Clone, Debug)]
-pub enum MaildirMessageStoreResult {
-    /// The coroutine has successfully terminated its progression.
-    Ok { id: String, path: MaildirPath },
-
-    /// The caller must supply the current time as `(secs, nanos)`
-    /// since the Unix epoch and feed back
-    /// [`MaildirMessageStoreArg::Time`].
-    WantsTime,
-
-    /// The caller must supply the current process id and feed back
-    /// [`MaildirMessageStoreArg::Pid`].
-    WantsPid,
-
-    /// The caller must supply the host name (or any caller-defined
-    /// uniqueness suffix) and feed back
-    /// [`MaildirMessageStoreArg::Hostname`].
-    WantsHostname,
-
-    /// The caller must write the given files and feed back
-    /// [`MaildirMessageStoreArg::FileCreate`].
-    WantsFileCreate(BTreeMap<MaildirPath, Vec<u8>>),
-
-    /// The caller must rename each `(from, to)` pair and feed back
-    /// [`MaildirMessageStoreArg::Rename`].
-    WantsRename(Vec<(MaildirPath, MaildirPath)>),
-
-    /// The coroutine encountered an error.
-    Err(MaildirMessageStoreError),
+pub struct MaildirMessageStoreOk {
+    pub id: String,
+    pub path: MaildirPath,
 }
 
 /// Internal progression state of [`MaildirMessageStore`].
@@ -107,22 +83,22 @@ pub enum State {
     Invalid,
 }
 
-/// Argument fed back to [`MaildirMessageStore::resume`].
+/// Argument fed back into [`MaildirMessageStore`].
 #[derive(Clone, Debug)]
 pub enum MaildirMessageStoreArg {
-    /// Response to [`MaildirMessageStoreResult::WantsTime`].
+    /// Response to [`MaildirCoroutineState::WantsTime`].
     Time { secs: u64, nanos: u32 },
 
-    /// Response to [`MaildirMessageStoreResult::WantsPid`].
+    /// Response to [`MaildirCoroutineState::WantsPid`].
     Pid(u32),
 
-    /// Response to [`MaildirMessageStoreResult::WantsHostname`].
+    /// Response to [`MaildirCoroutineState::WantsHostname`].
     Hostname(String),
 
-    /// Response to [`MaildirMessageStoreResult::WantsFileCreate`].
+    /// Response to [`MaildirCoroutineState::WantsFileCreate`].
     FileCreate,
 
-    /// Response to [`MaildirMessageStoreResult::WantsRename`].
+    /// Response to [`MaildirCoroutineState::WantsRename`].
     Rename,
 }
 
@@ -154,13 +130,18 @@ impl MaildirMessageStore {
             },
         }
     }
+}
 
-    /// Makes the message store progress.
-    pub fn resume(
+impl MaildirCoroutine for MaildirMessageStore {
+    type Arg = MaildirMessageStoreArg;
+    type Output = MaildirMessageStoreOk;
+    type Error = MaildirMessageStoreError;
+
+    fn resume(
         &mut self,
-        arg: Option<impl Into<MaildirMessageStoreArg>>,
-    ) -> MaildirMessageStoreResult {
-        match (mem::take(&mut self.state), arg.map(Into::into)) {
+        arg: Option<Self::Arg>,
+    ) -> MaildirCoroutineState<Self::Output, Self::Error> {
+        match (mem::take(&mut self.state), arg) {
             (
                 State::Start {
                     maildir,
@@ -177,7 +158,7 @@ impl MaildirMessageStore {
                     flags,
                     contents,
                 };
-                MaildirMessageStoreResult::WantsTime
+                MaildirCoroutineState::WantsTime
             }
             (
                 State::AwaitingTime {
@@ -197,7 +178,7 @@ impl MaildirMessageStore {
                     secs,
                     nanos,
                 };
-                MaildirMessageStoreResult::WantsPid
+                MaildirCoroutineState::WantsPid
             }
             (
                 State::AwaitingPid {
@@ -220,7 +201,7 @@ impl MaildirMessageStore {
                     nanos,
                     pid,
                 };
-                MaildirMessageStoreResult::WantsHostname
+                MaildirCoroutineState::WantsHostname
             }
             (
                 State::AwaitingHostname {
@@ -255,7 +236,7 @@ impl MaildirMessageStore {
                     final_path,
                     id,
                 };
-                MaildirMessageStoreResult::WantsFileCreate(files)
+                MaildirCoroutineState::WantsFileCreate(files)
             }
             (
                 State::Created {
@@ -269,19 +250,19 @@ impl MaildirMessageStore {
 
                 let pairs = vec![(tmp_path, final_path.clone())];
                 self.state = State::Renamed { final_path, id };
-                MaildirMessageStoreResult::WantsRename(pairs)
+                MaildirCoroutineState::WantsRename(pairs)
             }
             (State::Renamed { final_path, id }, Some(MaildirMessageStoreArg::Rename)) => {
                 trace!("renamed tmp file to {final_path}");
 
-                MaildirMessageStoreResult::Ok {
+                MaildirCoroutineState::Done(MaildirMessageStoreOk {
                     id,
                     path: final_path,
-                }
+                })
             }
             (state, arg) => {
                 let err = MaildirMessageStoreError::Invalid(arg, state);
-                MaildirMessageStoreResult::Err(err)
+                MaildirCoroutineState::Err(err)
             }
         }
     }

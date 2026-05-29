@@ -113,6 +113,27 @@ impl From<&str> for MaildirPath {
     }
 }
 
+#[cfg(feature = "client")]
+impl From<std::path::PathBuf> for MaildirPath {
+    fn from(path: std::path::PathBuf) -> Self {
+        Self(path.to_string_lossy().into_owned())
+    }
+}
+
+#[cfg(feature = "client")]
+impl From<&std::path::Path> for MaildirPath {
+    fn from(path: &std::path::Path) -> Self {
+        Self(path.to_string_lossy().into_owned())
+    }
+}
+
+#[cfg(feature = "client")]
+impl From<MaildirPath> for std::path::PathBuf {
+    fn from(path: MaildirPath) -> Self {
+        Self::from(path.0)
+    }
+}
+
 impl AsRef<str> for MaildirPath {
     fn as_ref(&self) -> &str {
         &self.0

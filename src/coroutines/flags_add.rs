@@ -5,13 +5,13 @@ use core::mem;
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     string::{String, ToString},
-    vec::Vec,
 };
 
 use log::trace;
 use thiserror::Error;
 
 use crate::{
+    coroutine::*,
     coroutines::message_locate::*,
     flag::MaildirFlags,
     maildir::{Maildir, MaildirSubdir},
@@ -29,26 +29,6 @@ pub enum MaildirFlagsAddError {
     Locate(#[from] MaildirMessageLocateError),
 }
 
-/// Result returned by [`MaildirFlagsAdd::resume`].
-#[derive(Clone, Debug)]
-pub enum MaildirFlagsAddResult {
-    /// The coroutine has successfully terminated its progression.
-    Ok,
-
-    /// Forwarded from the inner locate coroutine.
-    WantsFileExists(BTreeSet<MaildirPath>),
-
-    /// Forwarded from the inner locate coroutine.
-    WantsDirRead(BTreeSet<MaildirPath>),
-
-    /// The caller must rename each `(from, to)` pair and feed back
-    /// [`MaildirFlagsAddArg::Rename`].
-    WantsRename(Vec<(MaildirPath, MaildirPath)>),
-
-    /// The coroutine encountered an error.
-    Err(MaildirFlagsAddError),
-}
-
 /// Internal progression state of [`MaildirFlagsAdd`].
 #[derive(Clone, Debug, Default)]
 pub enum State {
@@ -58,7 +38,7 @@ pub enum State {
     Invalid,
 }
 
-/// Argument fed back to [`MaildirFlagsAdd::resume`].
+/// Argument fed back into [`MaildirFlagsAdd`].
 #[derive(Clone, Debug)]
 pub enum MaildirFlagsAddArg {
     /// Forwarded to the inner locate coroutine.
@@ -67,7 +47,7 @@ pub enum MaildirFlagsAddArg {
     /// Forwarded to the inner locate coroutine.
     DirRead(BTreeMap<MaildirPath, BTreeSet<MaildirPath>>),
 
-    /// Response to [`MaildirFlagsAddResult::WantsRename`].
+    /// Response to [`MaildirCoroutineState::WantsRename`].
     Rename,
 }
 
@@ -93,10 +73,18 @@ impl MaildirFlagsAdd {
             flags,
         }
     }
+}
 
-    /// Makes the flags add progress.
-    pub fn resume(&mut self, arg: Option<impl Into<MaildirFlagsAddArg>>) -> MaildirFlagsAddResult {
-        match (mem::take(&mut self.state), arg.map(Into::into)) {
+impl MaildirCoroutine for MaildirFlagsAdd {
+    type Arg = MaildirFlagsAddArg;
+    type Output = ();
+    type Error = MaildirFlagsAddError;
+
+    fn resume(
+        &mut self,
+        arg: Option<Self::Arg>,
+    ) -> MaildirCoroutineState<Self::Output, Self::Error> {
+        match (mem::take(&mut self.state), arg) {
             (State::Locate(mut c), arg) => {
                 let locate_arg = match arg {
                     None => None,
@@ -109,19 +97,19 @@ impl MaildirFlagsAdd {
                     Some(other) => {
                         let state = State::Locate(c);
                         let err = MaildirFlagsAddError::Invalid(Some(other), state);
-                        return MaildirFlagsAddResult::Err(err);
+                        return MaildirCoroutineState::Err(err);
                     }
                 };
 
                 match c.resume(locate_arg) {
-                    MaildirMessageLocateResult::Ok {
+                    MaildirCoroutineState::Done(MaildirMessageLocateOk {
                         path,
                         subdir,
                         flags: mut existing,
-                    } => match subdir {
+                    }) => match subdir {
                         MaildirSubdir::New | MaildirSubdir::Tmp => {
                             trace!("message is in /new or /tmp, flags are a no-op");
-                            MaildirFlagsAddResult::Ok
+                            MaildirCoroutineState::Done(())
                         }
                         MaildirSubdir::Cur => {
                             existing.extend(self.flags.clone());
@@ -131,24 +119,25 @@ impl MaildirFlagsAdd {
 
                             let pairs = vec![(path, new_path)];
                             self.state = State::Renamed;
-                            MaildirFlagsAddResult::WantsRename(pairs)
+                            MaildirCoroutineState::WantsRename(pairs)
                         }
                     },
-                    MaildirMessageLocateResult::WantsFileExists(probes) => {
+                    MaildirCoroutineState::WantsFileExists(probes) => {
                         self.state = State::Locate(c);
-                        MaildirFlagsAddResult::WantsFileExists(probes)
+                        MaildirCoroutineState::WantsFileExists(probes)
                     }
-                    MaildirMessageLocateResult::WantsDirRead(paths) => {
+                    MaildirCoroutineState::WantsDirRead(paths) => {
                         self.state = State::Locate(c);
-                        MaildirFlagsAddResult::WantsDirRead(paths)
+                        MaildirCoroutineState::WantsDirRead(paths)
                     }
-                    MaildirMessageLocateResult::Err(err) => MaildirFlagsAddResult::Err(err.into()),
+                    MaildirCoroutineState::Err(err) => MaildirCoroutineState::Err(err.into()),
+                    other => unreachable!("MaildirMessageLocate yielded {other:?}"),
                 }
             }
-            (State::Renamed, Some(MaildirFlagsAddArg::Rename)) => MaildirFlagsAddResult::Ok,
+            (State::Renamed, Some(MaildirFlagsAddArg::Rename)) => MaildirCoroutineState::Done(()),
             (state, arg) => {
                 let err = MaildirFlagsAddError::Invalid(arg, state);
-                MaildirFlagsAddResult::Err(err)
+                MaildirCoroutineState::Err(err)
             }
         }
     }

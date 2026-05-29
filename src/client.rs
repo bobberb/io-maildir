@@ -1,9 +1,9 @@
 //! Standard, blocking Maildir client.
 //!
 //! Holds a single filesystem root and exposes one method per
-//! coroutine. Every method runs its coroutine to completion by
-//! performing the requested filesystem operations via [`std::fs`]
-//! in a resume loop.
+//! coroutine. Every method runs its coroutine to completion through
+//! [`MaildirClient::run`] by performing the requested filesystem
+//! operations via [`std::fs`].
 
 use alloc::{
     collections::{BTreeMap, BTreeSet},
@@ -20,6 +20,7 @@ use log::trace;
 use thiserror::Error;
 
 use crate::{
+    coroutine::*,
     coroutines::{
         dovecot_load::*, dovecot_store::*, flags_add::*, flags_remove::*, flags_set::*,
         maildir_create::*, maildir_delete::*, maildir_list::*, maildir_rename::*, message_copy::*,
@@ -138,28 +139,47 @@ impl MaildirClient {
         &self.root
     }
 
+    /// Drives any [`MaildirCoroutine`] to completion. The `handler`
+    /// closure receives each non-terminal [`MaildirCoroutineState`]
+    /// variant and returns the [`Arg`](MaildirCoroutine::Arg) to
+    /// feed back. Variants the coroutine never emits can be matched
+    /// with an `unreachable!()` arm.
+    pub fn run<C, F>(
+        &self,
+        mut coroutine: C,
+        mut handler: F,
+    ) -> Result<C::Output, MaildirClientError>
+    where
+        C: MaildirCoroutine,
+        MaildirClientError: From<C::Error>,
+        F: FnMut(MaildirCoroutineState<C::Output, C::Error>) -> Result<C::Arg, MaildirClientError>,
+    {
+        let mut arg: Option<C::Arg> = None;
+        loop {
+            match coroutine.resume(arg.take()) {
+                MaildirCoroutineState::Done(out) => return Ok(out),
+                MaildirCoroutineState::Err(err) => return Err(err.into()),
+                other => arg = Some(handler(other)?),
+            }
+        }
+    }
+
     /// Runs [`DovecotLoad`] for `maildir`, returning the slot table
-    /// when the `dovecot-keywords` file is present and an empty table
-    /// otherwise.
+    /// when the `dovecot-keywords` file is present and an empty
+    /// table otherwise.
     pub fn load_dovecot_keywords(
         &self,
         maildir: &Maildir,
     ) -> Result<BTreeMap<char, String>, MaildirClientError> {
-        let mut coroutine = DovecotLoad::new(maildir);
-        let mut arg: Option<DovecotLoadArg> = None;
-
-        loop {
-            match coroutine.resume(arg.take()) {
-                DovecotLoadResult::Ok(table) => return Ok(table),
-                DovecotLoadResult::WantsFileExists(paths) => {
-                    arg = Some(DovecotLoadArg::FileExists(file_exists(paths)));
-                }
-                DovecotLoadResult::WantsFileRead(paths) => {
-                    arg = Some(DovecotLoadArg::FileRead(read_files(paths)?));
-                }
-                DovecotLoadResult::Err(err) => return Err(err.into()),
+        self.run(DovecotLoad::new(maildir), |state| match state {
+            MaildirCoroutineState::WantsFileExists(paths) => {
+                Ok(DovecotLoadArg::FileExists(file_exists(paths)))
             }
-        }
+            MaildirCoroutineState::WantsFileRead(paths) => {
+                Ok(DovecotLoadArg::FileRead(read_files(paths)?))
+            }
+            other => unreachable!("DovecotLoad yielded {other:?}"),
+        })
     }
 
     /// Runs [`DovecotStore`] for `maildir` with the given table.
@@ -168,19 +188,13 @@ impl MaildirClient {
         maildir: &Maildir,
         table: &BTreeMap<char, String>,
     ) -> Result<(), MaildirClientError> {
-        let mut coroutine = DovecotStore::new(maildir, table);
-        let mut arg: Option<DovecotStoreArg> = None;
-
-        loop {
-            match coroutine.resume(arg.take()) {
-                DovecotStoreResult::Ok => return Ok(()),
-                DovecotStoreResult::WantsFileCreate(files) => {
-                    write_files(files)?;
-                    arg = Some(DovecotStoreArg::FileCreate);
-                }
-                DovecotStoreResult::Err(err) => return Err(err.into()),
+        self.run(DovecotStore::new(maildir, table), |state| match state {
+            MaildirCoroutineState::WantsFileCreate(files) => {
+                write_files(files)?;
+                Ok(DovecotStoreArg::FileCreate)
             }
-        }
+            other => unreachable!("DovecotStore yielded {other:?}"),
+        })
     }
 
     /// Opens an existing Maildir at `path`, validating that
@@ -196,37 +210,25 @@ impl MaildirClient {
 
     /// Runs [`MaildirCreate`]: creates the Maildir at `path`.
     pub fn create_maildir(&self, path: impl Into<MaildirPath>) -> Result<(), MaildirClientError> {
-        let mut coroutine = MaildirCreate::new(path);
-        let mut arg: Option<MaildirCreateArg> = None;
-
-        loop {
-            match coroutine.resume(arg.take()) {
-                MaildirCreateResult::Ok => return Ok(()),
-                MaildirCreateResult::WantsDirCreate(paths) => {
-                    create_dirs(paths)?;
-                    arg = Some(MaildirCreateArg::DirCreate);
-                }
-                MaildirCreateResult::Err(err) => return Err(err.into()),
+        self.run(MaildirCreate::new(path), |state| match state {
+            MaildirCoroutineState::WantsDirCreate(paths) => {
+                create_dirs(paths)?;
+                Ok(MaildirCreateArg::DirCreate)
             }
-        }
+            other => unreachable!("MaildirCreate yielded {other:?}"),
+        })
     }
 
     /// Runs [`MaildirDelete`]: recursively removes the Maildir
     /// rooted at `path`.
     pub fn delete_maildir(&self, path: impl Into<MaildirPath>) -> Result<(), MaildirClientError> {
-        let mut coroutine = MaildirDelete::new(path);
-        let mut arg: Option<MaildirDeleteArg> = None;
-
-        loop {
-            match coroutine.resume(arg.take()) {
-                MaildirDeleteResult::Ok => return Ok(()),
-                MaildirDeleteResult::WantsDirRemove(paths) => {
-                    remove_dirs(paths)?;
-                    arg = Some(MaildirDeleteArg::DirRemove);
-                }
-                MaildirDeleteResult::Err(err) => return Err(err.into()),
+        self.run(MaildirDelete::new(path), |state| match state {
+            MaildirCoroutineState::WantsDirRemove(paths) => {
+                remove_dirs(paths)?;
+                Ok(MaildirDeleteArg::DirRemove)
             }
-        }
+            other => unreachable!("MaildirDelete yielded {other:?}"),
+        })
     }
 
     /// Runs [`MaildirList`]: lists every valid Maildir directly
@@ -236,23 +238,18 @@ impl MaildirClient {
     /// [`Self::maildir_plus`] is set; the root itself is also probed
     /// in that mode so the inbox shows up alongside its children.
     pub fn list_maildirs(&self) -> Result<BTreeSet<Maildir>, MaildirClientError> {
-        let mut coroutine = MaildirList::new(self.root.clone())
+        let coroutine = MaildirList::new(self.root.clone())
             .include_dotted(self.maildir_plus)
             .include_root(self.maildir_plus);
-        let mut arg: Option<MaildirListArg> = None;
-
-        loop {
-            match coroutine.resume(arg.take()) {
-                MaildirListResult::Ok(maildirs) => return Ok(maildirs),
-                MaildirListResult::WantsDirRead(paths) => {
-                    arg = Some(MaildirListArg::DirRead(read_dirs(paths)?));
-                }
-                MaildirListResult::WantsDirExists(paths) => {
-                    arg = Some(MaildirListArg::DirExists(dir_exists(paths)));
-                }
-                MaildirListResult::Err(err) => return Err(err.into()),
+        self.run(coroutine, |state| match state {
+            MaildirCoroutineState::WantsDirRead(paths) => {
+                Ok(MaildirListArg::DirRead(read_dirs(paths)?))
             }
-        }
+            MaildirCoroutineState::WantsDirExists(paths) => {
+                Ok(MaildirListArg::DirExists(dir_exists(paths)))
+            }
+            other => unreachable!("MaildirList yielded {other:?}"),
+        })
     }
 
     /// Runs [`MaildirRename`]: renames the Maildir at `path` to
@@ -262,19 +259,13 @@ impl MaildirClient {
         path: impl Into<MaildirPath>,
         name: impl ToString,
     ) -> Result<(), MaildirClientError> {
-        let mut coroutine = MaildirRename::new(path, name);
-        let mut arg: Option<MaildirRenameArg> = None;
-
-        loop {
-            match coroutine.resume(arg.take()) {
-                MaildirRenameResult::Ok => return Ok(()),
-                MaildirRenameResult::WantsRename(pairs) => {
-                    rename_paths(pairs)?;
-                    arg = Some(MaildirRenameArg::Rename);
-                }
-                MaildirRenameResult::Err(err) => return Err(err.into()),
+        self.run(MaildirRename::new(path, name), |state| match state {
+            MaildirCoroutineState::WantsRename(pairs) => {
+                rename_paths(pairs)?;
+                Ok(MaildirRenameArg::Rename)
             }
-        }
+            other => unreachable!("MaildirRename yielded {other:?}"),
+        })
     }
 
     // ---- MaildirFlags --------------------------------------------------
@@ -283,10 +274,11 @@ impl MaildirClient {
     /// `maildir`. Messages in `/new` or `/tmp` are left unchanged.
     ///
     /// When [`Self::dovecot_keywords`] is enabled, every
-    /// [`MaildirFlag::Keyword`](crate::flag::MaildirFlag::Keyword) is
-    /// resolved against the per-folder slot table (allocating a fresh
-    /// slot when needed) and the resulting letter is appended to the
-    /// filename. Otherwise, keyword variants are silently dropped.
+    /// [`MaildirFlag::Keyword`](crate::flag::MaildirFlag::Keyword)
+    /// is resolved against the per-folder slot table (allocating a
+    /// fresh slot when needed) and the resulting letter is appended
+    /// to the filename. Otherwise, keyword variants are silently
+    /// dropped.
     pub fn add_flags(
         &self,
         maildir: Maildir,
@@ -294,25 +286,22 @@ impl MaildirClient {
         mut flags: MaildirFlags,
     ) -> Result<(), MaildirClientError> {
         self.resolve_keywords(&maildir, &mut flags)?;
-        let mut coroutine = MaildirFlagsAdd::new(maildir, id, flags);
-        let mut arg: Option<MaildirFlagsAddArg> = None;
-
-        loop {
-            match coroutine.resume(arg.take()) {
-                MaildirFlagsAddResult::Ok => return Ok(()),
-                MaildirFlagsAddResult::WantsFileExists(paths) => {
-                    arg = Some(MaildirFlagsAddArg::FileExists(file_exists(paths)));
+        self.run(
+            MaildirFlagsAdd::new(maildir, id, flags),
+            |state| match state {
+                MaildirCoroutineState::WantsFileExists(paths) => {
+                    Ok(MaildirFlagsAddArg::FileExists(file_exists(paths)))
                 }
-                MaildirFlagsAddResult::WantsDirRead(paths) => {
-                    arg = Some(MaildirFlagsAddArg::DirRead(read_dirs(paths)?));
+                MaildirCoroutineState::WantsDirRead(paths) => {
+                    Ok(MaildirFlagsAddArg::DirRead(read_dirs(paths)?))
                 }
-                MaildirFlagsAddResult::WantsRename(pairs) => {
+                MaildirCoroutineState::WantsRename(pairs) => {
                     rename_paths(pairs)?;
-                    arg = Some(MaildirFlagsAddArg::Rename);
+                    Ok(MaildirFlagsAddArg::Rename)
                 }
-                MaildirFlagsAddResult::Err(err) => return Err(err.into()),
-            }
-        }
+                other => unreachable!("MaildirFlagsAdd yielded {other:?}"),
+            },
+        )
     }
 
     /// Runs [`MaildirFlagsRemove`]: removes `flags` from message
@@ -329,25 +318,22 @@ impl MaildirClient {
         mut flags: MaildirFlags,
     ) -> Result<(), MaildirClientError> {
         self.resolve_keywords(&maildir, &mut flags)?;
-        let mut coroutine = MaildirFlagsRemove::new(maildir, id, flags);
-        let mut arg: Option<MaildirFlagsRemoveArg> = None;
-
-        loop {
-            match coroutine.resume(arg.take()) {
-                MaildirFlagsRemoveResult::Ok => return Ok(()),
-                MaildirFlagsRemoveResult::WantsFileExists(paths) => {
-                    arg = Some(MaildirFlagsRemoveArg::FileExists(file_exists(paths)));
+        self.run(
+            MaildirFlagsRemove::new(maildir, id, flags),
+            |state| match state {
+                MaildirCoroutineState::WantsFileExists(paths) => {
+                    Ok(MaildirFlagsRemoveArg::FileExists(file_exists(paths)))
                 }
-                MaildirFlagsRemoveResult::WantsDirRead(paths) => {
-                    arg = Some(MaildirFlagsRemoveArg::DirRead(read_dirs(paths)?));
+                MaildirCoroutineState::WantsDirRead(paths) => {
+                    Ok(MaildirFlagsRemoveArg::DirRead(read_dirs(paths)?))
                 }
-                MaildirFlagsRemoveResult::WantsRename(pairs) => {
+                MaildirCoroutineState::WantsRename(pairs) => {
                     rename_paths(pairs)?;
-                    arg = Some(MaildirFlagsRemoveArg::Rename);
+                    Ok(MaildirFlagsRemoveArg::Rename)
                 }
-                MaildirFlagsRemoveResult::Err(err) => return Err(err.into()),
-            }
-        }
+                other => unreachable!("MaildirFlagsRemove yielded {other:?}"),
+            },
+        )
     }
 
     /// Runs [`MaildirFlagsSet`]: replaces the flags of message `id`
@@ -363,25 +349,22 @@ impl MaildirClient {
         mut flags: MaildirFlags,
     ) -> Result<(), MaildirClientError> {
         self.resolve_keywords(&maildir, &mut flags)?;
-        let mut coroutine = MaildirFlagsSet::new(maildir, id, flags);
-        let mut arg: Option<MaildirFlagsSetArg> = None;
-
-        loop {
-            match coroutine.resume(arg.take()) {
-                MaildirFlagsSetResult::Ok => return Ok(()),
-                MaildirFlagsSetResult::WantsFileExists(paths) => {
-                    arg = Some(MaildirFlagsSetArg::FileExists(file_exists(paths)));
+        self.run(
+            MaildirFlagsSet::new(maildir, id, flags),
+            |state| match state {
+                MaildirCoroutineState::WantsFileExists(paths) => {
+                    Ok(MaildirFlagsSetArg::FileExists(file_exists(paths)))
                 }
-                MaildirFlagsSetResult::WantsDirRead(paths) => {
-                    arg = Some(MaildirFlagsSetArg::DirRead(read_dirs(paths)?));
+                MaildirCoroutineState::WantsDirRead(paths) => {
+                    Ok(MaildirFlagsSetArg::DirRead(read_dirs(paths)?))
                 }
-                MaildirFlagsSetResult::WantsRename(pairs) => {
+                MaildirCoroutineState::WantsRename(pairs) => {
                     rename_paths(pairs)?;
-                    arg = Some(MaildirFlagsSetArg::Rename);
+                    Ok(MaildirFlagsSetArg::Rename)
                 }
-                MaildirFlagsSetResult::Err(err) => return Err(err.into()),
-            }
-        }
+                other => unreachable!("MaildirFlagsSet yielded {other:?}"),
+            },
+        )
     }
 
     // ---- Messages -----------------------------------------------
@@ -394,25 +377,23 @@ impl MaildirClient {
         maildir: Maildir,
         id: impl ToString,
     ) -> Result<(MaildirPath, MaildirSubdir, MaildirFlags), MaildirClientError> {
-        let mut coroutine = MaildirMessageLocate::new(maildir, id);
-        let mut arg: Option<MaildirMessageLocateArg> = None;
-
-        loop {
-            match coroutine.resume(arg.take()) {
-                MaildirMessageLocateResult::Ok {
-                    path,
-                    subdir,
-                    flags,
-                } => return Ok((path, subdir, flags)),
-                MaildirMessageLocateResult::WantsFileExists(paths) => {
-                    arg = Some(MaildirMessageLocateArg::FileExists(file_exists(paths)));
+        let MaildirMessageLocateOk {
+            path,
+            subdir,
+            flags,
+        } = self.run(
+            MaildirMessageLocate::new(maildir, id),
+            |state| match state {
+                MaildirCoroutineState::WantsFileExists(paths) => {
+                    Ok(MaildirMessageLocateArg::FileExists(file_exists(paths)))
                 }
-                MaildirMessageLocateResult::WantsDirRead(paths) => {
-                    arg = Some(MaildirMessageLocateArg::DirRead(read_dirs(paths)?));
+                MaildirCoroutineState::WantsDirRead(paths) => {
+                    Ok(MaildirMessageLocateArg::DirRead(read_dirs(paths)?))
                 }
-                MaildirMessageLocateResult::Err(err) => return Err(err.into()),
-            }
-        }
+                other => unreachable!("MaildirMessageLocate yielded {other:?}"),
+            },
+        )?;
+        Ok((path, subdir, flags))
     }
 
     /// Runs [`MaildirMessageGet`]: locates message `id` in
@@ -422,49 +403,38 @@ impl MaildirClient {
         maildir: Maildir,
         id: impl ToString,
     ) -> Result<MaildirMessage, MaildirClientError> {
-        let mut coroutine = MaildirMessageGet::new(maildir, id);
-        let mut arg: Option<MaildirMessageGetArg> = None;
-
-        loop {
-            match coroutine.resume(arg.take()) {
-                MaildirMessageGetResult::Ok(message) => return Ok(message),
-                MaildirMessageGetResult::WantsFileExists(paths) => {
-                    arg = Some(MaildirMessageGetArg::FileExists(file_exists(paths)));
-                }
-                MaildirMessageGetResult::WantsDirRead(paths) => {
-                    arg = Some(MaildirMessageGetArg::DirRead(read_dirs(paths)?));
-                }
-                MaildirMessageGetResult::WantsFileRead(paths) => {
-                    arg = Some(MaildirMessageGetArg::FileRead(read_files(paths)?));
-                }
-                MaildirMessageGetResult::Err(err) => return Err(err.into()),
+        self.run(MaildirMessageGet::new(maildir, id), |state| match state {
+            MaildirCoroutineState::WantsFileExists(paths) => {
+                Ok(MaildirMessageGetArg::FileExists(file_exists(paths)))
             }
-        }
+            MaildirCoroutineState::WantsDirRead(paths) => {
+                Ok(MaildirMessageGetArg::DirRead(read_dirs(paths)?))
+            }
+            MaildirCoroutineState::WantsFileRead(paths) => {
+                Ok(MaildirMessageGetArg::FileRead(read_files(paths)?))
+            }
+            other => unreachable!("MaildirMessageGet yielded {other:?}"),
+        })
     }
 
-    /// Runs [`MaildirMessagesList`]: scans both `/new` and `/cur` of
-    /// `maildir` and returns every confirmed entry. Bodies are not
-    /// loaded; pair with [`Self::read_entry`] / [`Self::read_entries`]
-    /// / [`Self::read_entries_par`] to read contents.
+    /// Runs [`MaildirMessagesList`]: scans both `/new` and `/cur`
+    /// of `maildir` and returns every confirmed entry. Bodies are
+    /// not loaded; pair with [`Self::read_entry`] /
+    /// [`Self::read_entries`] / [`Self::read_entries_par`] to read
+    /// contents.
     pub fn list_entries(
         &self,
         maildir: Maildir,
     ) -> Result<BTreeSet<MaildirEntry>, MaildirClientError> {
-        let mut coroutine = MaildirMessagesList::new(maildir);
-        let mut arg: Option<MaildirMessagesListArg> = None;
-
-        loop {
-            match coroutine.resume(arg.take()) {
-                MaildirMessagesListResult::Ok(entries) => return Ok(entries),
-                MaildirMessagesListResult::WantsDirRead(paths) => {
-                    arg = Some(MaildirMessagesListArg::DirRead(read_dirs(paths)?));
-                }
-                MaildirMessagesListResult::WantsFileExists(paths) => {
-                    arg = Some(MaildirMessagesListArg::FileExists(file_exists(paths)));
-                }
-                MaildirMessagesListResult::Err(err) => return Err(err.into()),
+        self.run(MaildirMessagesList::new(maildir), |state| match state {
+            MaildirCoroutineState::WantsDirRead(paths) => {
+                Ok(MaildirMessagesListArg::DirRead(read_dirs(paths)?))
             }
-        }
+            MaildirCoroutineState::WantsFileExists(paths) => {
+                Ok(MaildirMessagesListArg::FileExists(file_exists(paths)))
+            }
+            other => unreachable!("MaildirMessagesList yielded {other:?}"),
+        })
     }
 
     /// Reads the file backing `entry` and returns it as a
@@ -550,10 +520,10 @@ impl MaildirClient {
     ///    [`MaildirFlag::Keyword`](crate::flag::MaildirFlag::Keyword)
     ///    is injected into `contents` as a single header line;
     /// 2. when [`Self::dovecot_keywords`] is `true`, the per-folder
-    ///    table is loaded, slots are allocated for the keywords (with
-    ///    a `warn!` and drop on 26-slot overflow), the resulting
-    ///    letters are appended to the filename info section and the
-    ///    grown table is persisted.
+    ///    table is loaded, slots are allocated for the keywords
+    ///    (with a `warn!` and drop on 26-slot overflow), the
+    ///    resulting letters are appended to the filename info
+    ///    section and the grown table is persisted.
     pub fn store(
         &self,
         maildir: Maildir,
@@ -596,37 +566,33 @@ impl MaildirClient {
             }
         }
 
-        let mut coroutine = MaildirMessageStore::new(maildir, subdir, flags, contents);
-        let mut arg: Option<MaildirMessageStoreArg> = None;
-
-        loop {
-            match coroutine.resume(arg.take()) {
-                MaildirMessageStoreResult::Ok { id, path } => return Ok((id, path)),
-                MaildirMessageStoreResult::WantsTime => {
+        let MaildirMessageStoreOk { id, path } = self.run(
+            MaildirMessageStore::new(maildir, subdir, flags, contents),
+            |state| match state {
+                MaildirCoroutineState::WantsTime => {
                     let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-                    arg = Some(MaildirMessageStoreArg::Time {
+                    Ok(MaildirMessageStoreArg::Time {
                         secs: ts.as_secs(),
                         nanos: ts.subsec_nanos(),
-                    });
+                    })
                 }
-                MaildirMessageStoreResult::WantsPid => {
-                    arg = Some(MaildirMessageStoreArg::Pid(process::id()));
-                }
-                MaildirMessageStoreResult::WantsHostname => {
+                MaildirCoroutineState::WantsPid => Ok(MaildirMessageStoreArg::Pid(process::id())),
+                MaildirCoroutineState::WantsHostname => {
                     let hostname = gethostname().into_string().unwrap_or_default();
-                    arg = Some(MaildirMessageStoreArg::Hostname(hostname));
+                    Ok(MaildirMessageStoreArg::Hostname(hostname))
                 }
-                MaildirMessageStoreResult::WantsFileCreate(files) => {
+                MaildirCoroutineState::WantsFileCreate(files) => {
                     write_files(files)?;
-                    arg = Some(MaildirMessageStoreArg::FileCreate);
+                    Ok(MaildirMessageStoreArg::FileCreate)
                 }
-                MaildirMessageStoreResult::WantsRename(pairs) => {
+                MaildirCoroutineState::WantsRename(pairs) => {
                     rename_paths(pairs)?;
-                    arg = Some(MaildirMessageStoreArg::Rename);
+                    Ok(MaildirMessageStoreArg::Rename)
                 }
-                MaildirMessageStoreResult::Err(err) => return Err(err.into()),
-            }
-        }
+                other => unreachable!("MaildirMessageStore yielded {other:?}"),
+            },
+        )?;
+        Ok((id, path))
     }
 
     /// Runs [`MaildirMessageCopy`]: copies message `id` from
@@ -638,31 +604,29 @@ impl MaildirClient {
         target: Maildir,
         target_subdir: Option<MaildirSubdir>,
     ) -> Result<(), MaildirClientError> {
-        let mut coroutine = MaildirMessageCopy::new(id, source, target, target_subdir);
-        let mut arg: Option<MaildirMessageCopyArg> = None;
-
-        loop {
-            match coroutine.resume(arg.take()) {
-                MaildirMessageCopyResult::Ok => return Ok(()),
-                MaildirMessageCopyResult::WantsFileExists(paths) => {
-                    arg = Some(MaildirMessageCopyArg::FileExists(file_exists(paths)));
+        self.run(
+            MaildirMessageCopy::new(id, source, target, target_subdir),
+            |state| match state {
+                MaildirCoroutineState::WantsFileExists(paths) => {
+                    Ok(MaildirMessageCopyArg::FileExists(file_exists(paths)))
                 }
-                MaildirMessageCopyResult::WantsDirRead(paths) => {
-                    arg = Some(MaildirMessageCopyArg::DirRead(read_dirs(paths)?));
+                MaildirCoroutineState::WantsDirRead(paths) => {
+                    Ok(MaildirMessageCopyArg::DirRead(read_dirs(paths)?))
                 }
-                MaildirMessageCopyResult::WantsCopy(pairs) => {
+                MaildirCoroutineState::WantsCopy(pairs) => {
                     copy_paths(pairs)?;
-                    arg = Some(MaildirMessageCopyArg::Copy);
+                    Ok(MaildirMessageCopyArg::Copy)
                 }
-                MaildirMessageCopyResult::Err(err) => return Err(err.into()),
-            }
-        }
+                other => unreachable!("MaildirMessageCopy yielded {other:?}"),
+            },
+        )
     }
 
     /// Projects every [`MaildirFlag::Keyword`] out of `flags`,
     /// allocates a slot for it in the dovecot-keywords table (when
-    /// [`Self::dovecot_keywords`] is set) and appends the slot letter
-    /// to the filename. Keyword variants are dropped otherwise.
+    /// [`Self::dovecot_keywords`] is set) and appends the slot
+    /// letter to the filename. Keyword variants are dropped
+    /// otherwise.
     ///
     /// [`MaildirFlag::Keyword`]: crate::flag::MaildirFlag::Keyword
     fn resolve_keywords(
@@ -708,25 +672,22 @@ impl MaildirClient {
         target: Maildir,
         target_subdir: Option<MaildirSubdir>,
     ) -> Result<(), MaildirClientError> {
-        let mut coroutine = MaildirMessageMove::new(id, source, target, target_subdir);
-        let mut arg: Option<MaildirMessageMoveArg> = None;
-
-        loop {
-            match coroutine.resume(arg.take()) {
-                MaildirMessageMoveResult::Ok => return Ok(()),
-                MaildirMessageMoveResult::WantsFileExists(paths) => {
-                    arg = Some(MaildirMessageMoveArg::FileExists(file_exists(paths)));
+        self.run(
+            MaildirMessageMove::new(id, source, target, target_subdir),
+            |state| match state {
+                MaildirCoroutineState::WantsFileExists(paths) => {
+                    Ok(MaildirMessageMoveArg::FileExists(file_exists(paths)))
                 }
-                MaildirMessageMoveResult::WantsDirRead(paths) => {
-                    arg = Some(MaildirMessageMoveArg::DirRead(read_dirs(paths)?));
+                MaildirCoroutineState::WantsDirRead(paths) => {
+                    Ok(MaildirMessageMoveArg::DirRead(read_dirs(paths)?))
                 }
-                MaildirMessageMoveResult::WantsRename(pairs) => {
+                MaildirCoroutineState::WantsRename(pairs) => {
                     rename_paths(pairs)?;
-                    arg = Some(MaildirMessageMoveArg::Rename);
+                    Ok(MaildirMessageMoveArg::Rename)
                 }
-                MaildirMessageMoveResult::Err(err) => return Err(err.into()),
-            }
-        }
+                other => unreachable!("MaildirMessageMove yielded {other:?}"),
+            },
+        )
     }
 }
 

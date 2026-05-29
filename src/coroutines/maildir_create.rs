@@ -6,6 +6,7 @@ use log::trace;
 use thiserror::Error;
 
 use crate::{
+    coroutine::*,
     maildir::{CUR, NEW, TMP},
     path::MaildirPath,
 };
@@ -17,24 +18,10 @@ pub enum MaildirCreateError {
     Invalid(Option<MaildirCreateArg>),
 }
 
-/// Result returned by [`MaildirCreate::resume`].
-#[derive(Clone, Debug)]
-pub enum MaildirCreateResult {
-    /// The coroutine has successfully terminated its progression.
-    Ok,
-
-    /// The caller must create the given directories and feed back
-    /// [`MaildirCreateArg::DirCreate`].
-    WantsDirCreate(BTreeSet<MaildirPath>),
-
-    /// The coroutine encountered an error.
-    Err(MaildirCreateError),
-}
-
-/// Argument fed back to [`MaildirCreate::resume`].
+/// Argument fed back into [`MaildirCreate`].
 #[derive(Clone, Debug)]
 pub enum MaildirCreateArg {
-    /// Response to [`MaildirCreateResult::WantsDirCreate`].
+    /// Response to [`MaildirCoroutineState::WantsDirCreate`].
     DirCreate,
 }
 
@@ -64,21 +51,29 @@ impl MaildirCreate {
             wants_dir_create: Some(paths),
         }
     }
+}
 
-    /// Makes the Maildir creation progress.
-    pub fn resume(&mut self, arg: Option<impl Into<MaildirCreateArg>>) -> MaildirCreateResult {
-        match (self.wants_dir_create.take(), arg.map(Into::into)) {
+impl MaildirCoroutine for MaildirCreate {
+    type Arg = MaildirCreateArg;
+    type Output = ();
+    type Error = MaildirCreateError;
+
+    fn resume(
+        &mut self,
+        arg: Option<Self::Arg>,
+    ) -> MaildirCoroutineState<Self::Output, Self::Error> {
+        match (self.wants_dir_create.take(), arg) {
             (Some(paths), None) => {
                 trace!("wants create of {} directories", paths.len());
-                MaildirCreateResult::WantsDirCreate(paths)
+                MaildirCoroutineState::WantsDirCreate(paths)
             }
             (None, Some(MaildirCreateArg::DirCreate)) => {
                 trace!("maildir created");
-                MaildirCreateResult::Ok
+                MaildirCoroutineState::Done(())
             }
             (_, arg) => {
                 let err = MaildirCreateError::Invalid(arg);
-                MaildirCreateResult::Err(err)
+                MaildirCoroutineState::Err(err)
             }
         }
     }

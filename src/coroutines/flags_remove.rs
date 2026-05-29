@@ -5,13 +5,13 @@ use core::mem;
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     string::{String, ToString},
-    vec::Vec,
 };
 
 use log::trace;
 use thiserror::Error;
 
 use crate::{
+    coroutine::*,
     coroutines::message_locate::*,
     flag::MaildirFlags,
     maildir::{Maildir, MaildirSubdir},
@@ -29,26 +29,6 @@ pub enum MaildirFlagsRemoveError {
     Locate(#[from] MaildirMessageLocateError),
 }
 
-/// Result returned by [`MaildirFlagsRemove::resume`].
-#[derive(Clone, Debug)]
-pub enum MaildirFlagsRemoveResult {
-    /// The coroutine has successfully terminated its progression.
-    Ok,
-
-    /// Forwarded from the inner locate coroutine.
-    WantsFileExists(BTreeSet<MaildirPath>),
-
-    /// Forwarded from the inner locate coroutine.
-    WantsDirRead(BTreeSet<MaildirPath>),
-
-    /// The caller must rename each `(from, to)` pair and feed back
-    /// [`MaildirFlagsRemoveArg::Rename`].
-    WantsRename(Vec<(MaildirPath, MaildirPath)>),
-
-    /// The coroutine encountered an error.
-    Err(MaildirFlagsRemoveError),
-}
-
 /// Internal progression state of [`MaildirFlagsRemove`].
 #[derive(Clone, Debug, Default)]
 pub enum State {
@@ -58,7 +38,7 @@ pub enum State {
     Invalid,
 }
 
-/// Argument fed back to [`MaildirFlagsRemove::resume`].
+/// Argument fed back into [`MaildirFlagsRemove`].
 #[derive(Clone, Debug)]
 pub enum MaildirFlagsRemoveArg {
     /// Forwarded to the inner locate coroutine.
@@ -67,7 +47,7 @@ pub enum MaildirFlagsRemoveArg {
     /// Forwarded to the inner locate coroutine.
     DirRead(BTreeMap<MaildirPath, BTreeSet<MaildirPath>>),
 
-    /// Response to [`MaildirFlagsRemoveResult::WantsRename`].
+    /// Response to [`MaildirCoroutineState::WantsRename`].
     Rename,
 }
 
@@ -93,13 +73,18 @@ impl MaildirFlagsRemove {
             flags,
         }
     }
+}
 
-    /// Makes the flags remove progress.
-    pub fn resume(
+impl MaildirCoroutine for MaildirFlagsRemove {
+    type Arg = MaildirFlagsRemoveArg;
+    type Output = ();
+    type Error = MaildirFlagsRemoveError;
+
+    fn resume(
         &mut self,
-        arg: Option<impl Into<MaildirFlagsRemoveArg>>,
-    ) -> MaildirFlagsRemoveResult {
-        match (mem::take(&mut self.state), arg.map(Into::into)) {
+        arg: Option<Self::Arg>,
+    ) -> MaildirCoroutineState<Self::Output, Self::Error> {
+        match (mem::take(&mut self.state), arg) {
             (State::Locate(mut c), arg) => {
                 let locate_arg = match arg {
                     None => None,
@@ -112,19 +97,19 @@ impl MaildirFlagsRemove {
                     Some(other) => {
                         let state = State::Locate(c);
                         let err = MaildirFlagsRemoveError::Invalid(Some(other), state);
-                        return MaildirFlagsRemoveResult::Err(err);
+                        return MaildirCoroutineState::Err(err);
                     }
                 };
 
                 match c.resume(locate_arg) {
-                    MaildirMessageLocateResult::Ok {
+                    MaildirCoroutineState::Done(MaildirMessageLocateOk {
                         path,
                         subdir,
                         flags: mut existing,
-                    } => match subdir {
+                    }) => match subdir {
                         MaildirSubdir::New | MaildirSubdir::Tmp => {
                             trace!("message is in /new or /tmp, flags are a no-op");
-                            MaildirFlagsRemoveResult::Ok
+                            MaildirCoroutineState::Done(())
                         }
                         MaildirSubdir::Cur => {
                             existing.difference(&self.flags);
@@ -134,26 +119,27 @@ impl MaildirFlagsRemove {
 
                             let pairs = vec![(path, new_path)];
                             self.state = State::Renamed;
-                            MaildirFlagsRemoveResult::WantsRename(pairs)
+                            MaildirCoroutineState::WantsRename(pairs)
                         }
                     },
-                    MaildirMessageLocateResult::WantsFileExists(probes) => {
+                    MaildirCoroutineState::WantsFileExists(probes) => {
                         self.state = State::Locate(c);
-                        MaildirFlagsRemoveResult::WantsFileExists(probes)
+                        MaildirCoroutineState::WantsFileExists(probes)
                     }
-                    MaildirMessageLocateResult::WantsDirRead(paths) => {
+                    MaildirCoroutineState::WantsDirRead(paths) => {
                         self.state = State::Locate(c);
-                        MaildirFlagsRemoveResult::WantsDirRead(paths)
+                        MaildirCoroutineState::WantsDirRead(paths)
                     }
-                    MaildirMessageLocateResult::Err(err) => {
-                        MaildirFlagsRemoveResult::Err(err.into())
-                    }
+                    MaildirCoroutineState::Err(err) => MaildirCoroutineState::Err(err.into()),
+                    other => unreachable!("MaildirMessageLocate yielded {other:?}"),
                 }
             }
-            (State::Renamed, Some(MaildirFlagsRemoveArg::Rename)) => MaildirFlagsRemoveResult::Ok,
+            (State::Renamed, Some(MaildirFlagsRemoveArg::Rename)) => {
+                MaildirCoroutineState::Done(())
+            }
             (state, arg) => {
                 let err = MaildirFlagsRemoveError::Invalid(arg, state);
-                MaildirFlagsRemoveResult::Err(err)
+                MaildirCoroutineState::Err(err)
             }
         }
     }

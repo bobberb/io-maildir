@@ -14,31 +14,13 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use log::trace;
 use thiserror::Error;
 
-use crate::{entry::MaildirEntry, maildir::Maildir, path::MaildirPath};
+use crate::{coroutine::*, entry::MaildirEntry, maildir::Maildir, path::MaildirPath};
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirMessagesListError {
     #[error("invalid Maildir messages list arg {0:?} for state {1:?}")]
     Invalid(Option<MaildirMessagesListArg>, State),
-}
-
-/// Result returned by [`MaildirMessagesList::resume`].
-#[derive(Clone, Debug)]
-pub enum MaildirMessagesListResult {
-    /// The coroutine has successfully terminated its progression.
-    Ok(BTreeSet<MaildirEntry>),
-
-    /// The caller must read the entries of the given directories and
-    /// feed back [`MaildirMessagesListArg::DirRead`].
-    WantsDirRead(BTreeSet<MaildirPath>),
-
-    /// The caller must check whether the given paths exist as regular
-    /// files and feed back [`MaildirMessagesListArg::FileExists`].
-    WantsFileExists(BTreeSet<MaildirPath>),
-
-    /// The coroutine encountered an error.
-    Err(MaildirMessagesListError),
 }
 
 /// Internal progression state of [`MaildirMessagesList`].
@@ -53,13 +35,13 @@ pub enum State {
     Invalid,
 }
 
-/// Argument fed back to [`MaildirMessagesList::resume`].
+/// Argument fed back into [`MaildirMessagesList`].
 #[derive(Clone, Debug)]
 pub enum MaildirMessagesListArg {
-    /// Response to [`MaildirMessagesListResult::WantsDirRead`].
+    /// Response to [`MaildirCoroutineState::WantsDirRead`].
     DirRead(BTreeMap<MaildirPath, BTreeSet<MaildirPath>>),
 
-    /// Response to [`MaildirMessagesListResult::WantsFileExists`].
+    /// Response to [`MaildirCoroutineState::WantsFileExists`].
     FileExists(BTreeMap<MaildirPath, bool>),
 }
 
@@ -78,19 +60,24 @@ impl MaildirMessagesList {
             state: State::Start(maildir),
         }
     }
+}
 
-    /// Makes the listing progress.
-    pub fn resume(
+impl MaildirCoroutine for MaildirMessagesList {
+    type Arg = MaildirMessagesListArg;
+    type Output = BTreeSet<MaildirEntry>;
+    type Error = MaildirMessagesListError;
+
+    fn resume(
         &mut self,
-        arg: Option<impl Into<MaildirMessagesListArg>>,
-    ) -> MaildirMessagesListResult {
-        match (mem::take(&mut self.state), arg.map(Into::into)) {
+        arg: Option<Self::Arg>,
+    ) -> MaildirCoroutineState<Self::Output, Self::Error> {
+        match (mem::take(&mut self.state), arg) {
             (State::Start(maildir), None) => {
                 trace!("wants read of /new and /cur");
 
                 let paths = BTreeSet::from_iter([maildir.new(), maildir.cur()]);
                 self.state = State::Reading;
-                MaildirMessagesListResult::WantsDirRead(paths)
+                MaildirCoroutineState::WantsDirRead(paths)
             }
             (State::Reading, Some(MaildirMessagesListArg::DirRead(entries))) => {
                 let mut candidates = BTreeSet::new();
@@ -111,14 +98,14 @@ impl MaildirMessagesList {
 
                 if candidates.is_empty() {
                     trace!("no candidate entries");
-                    return MaildirMessagesListResult::Ok(BTreeSet::new());
+                    return MaildirCoroutineState::Done(BTreeSet::new());
                 }
 
                 let probes = candidates.clone();
                 trace!("wants file-exists for {} candidates", probes.len());
 
                 self.state = State::Checking { candidates };
-                MaildirMessagesListResult::WantsFileExists(probes)
+                MaildirCoroutineState::WantsFileExists(probes)
             }
             (State::Checking { candidates }, Some(MaildirMessagesListArg::FileExists(probes))) => {
                 let confirmed: BTreeSet<MaildirEntry> = candidates
@@ -127,11 +114,11 @@ impl MaildirMessagesList {
                     .map(MaildirEntry::from_path)
                     .collect();
 
-                MaildirMessagesListResult::Ok(confirmed)
+                MaildirCoroutineState::Done(confirmed)
             }
             (state, arg) => {
                 let err = MaildirMessagesListError::Invalid(arg, state);
-                MaildirMessagesListResult::Err(err)
+                MaildirCoroutineState::Err(err)
             }
         }
     }

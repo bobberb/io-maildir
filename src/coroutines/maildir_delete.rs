@@ -5,7 +5,7 @@ use alloc::collections::BTreeSet;
 use log::trace;
 use thiserror::Error;
 
-use crate::path::MaildirPath;
+use crate::{coroutine::*, path::MaildirPath};
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Clone, Debug, Error)]
@@ -14,24 +14,10 @@ pub enum MaildirDeleteError {
     Invalid(Option<MaildirDeleteArg>),
 }
 
-/// Result returned by [`MaildirDelete::resume`].
-#[derive(Clone, Debug)]
-pub enum MaildirDeleteResult {
-    /// The coroutine has successfully terminated its progression.
-    Ok,
-
-    /// The caller must recursively remove the given directories and
-    /// feed back [`MaildirDeleteArg::DirRemove`].
-    WantsDirRemove(BTreeSet<MaildirPath>),
-
-    /// The coroutine encountered an error.
-    Err(MaildirDeleteError),
-}
-
-/// Argument fed back to [`MaildirDelete::resume`].
+/// Argument fed back into [`MaildirDelete`].
 #[derive(Clone, Debug)]
 pub enum MaildirDeleteArg {
-    /// Response to [`MaildirDeleteResult::WantsDirRemove`].
+    /// Response to [`MaildirCoroutineState::WantsDirRemove`].
     DirRemove,
 }
 
@@ -50,21 +36,29 @@ impl MaildirDelete {
             wants_dir_remove: Some(paths),
         }
     }
+}
 
-    /// Makes the Maildir deletion progress.
-    pub fn resume(&mut self, arg: Option<impl Into<MaildirDeleteArg>>) -> MaildirDeleteResult {
-        match (self.wants_dir_remove.take(), arg.map(Into::into)) {
+impl MaildirCoroutine for MaildirDelete {
+    type Arg = MaildirDeleteArg;
+    type Output = ();
+    type Error = MaildirDeleteError;
+
+    fn resume(
+        &mut self,
+        arg: Option<Self::Arg>,
+    ) -> MaildirCoroutineState<Self::Output, Self::Error> {
+        match (self.wants_dir_remove.take(), arg) {
             (Some(paths), None) => {
                 trace!("wants remove of {} directories", paths.len());
-                MaildirDeleteResult::WantsDirRemove(paths)
+                MaildirCoroutineState::WantsDirRemove(paths)
             }
             (None, Some(MaildirDeleteArg::DirRemove)) => {
                 trace!("maildir removed");
-                MaildirDeleteResult::Ok
+                MaildirCoroutineState::Done(())
             }
             (_, arg) => {
                 let err = MaildirDeleteError::Invalid(arg);
-                MaildirDeleteResult::Err(err)
+                MaildirCoroutineState::Err(err)
             }
         }
     }

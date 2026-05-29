@@ -126,8 +126,8 @@ impl MaildirFlags {
     }
 
     /// Appends raw info-section letters that will be written verbatim
-    /// by [`Display`]. Use it for dovecot `a..z` slot letters already
-    /// resolved at the caller.
+    /// by [`fmt::Display`]. Use it for dovecot `a..z` slot letters
+    /// already resolved at the caller.
     pub fn extend_letters<I>(&mut self, letters: I)
     where
         I: IntoIterator<Item = char>,

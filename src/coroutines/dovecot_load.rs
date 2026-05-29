@@ -13,7 +13,7 @@ use alloc::{
 use log::trace;
 use thiserror::Error;
 
-use crate::{headers::parse_dovecot_keywords, maildir::Maildir, path::MaildirPath};
+use crate::{coroutine::*, headers::parse_dovecot_keywords, maildir::Maildir, path::MaildirPath};
 
 const FILENAME: &str = "dovecot-keywords";
 
@@ -24,16 +24,7 @@ pub enum DovecotLoadError {
     Invalid(Option<DovecotLoadArg>),
 }
 
-/// Result returned by [`DovecotLoad::resume`].
-#[derive(Debug)]
-pub enum DovecotLoadResult {
-    Ok(BTreeMap<char, String>),
-    WantsFileExists(BTreeSet<MaildirPath>),
-    WantsFileRead(BTreeSet<MaildirPath>),
-    Err(DovecotLoadError),
-}
-
-/// Argument fed back to [`DovecotLoad::resume`].
+/// Argument fed back into [`DovecotLoad`].
 #[derive(Clone, Debug)]
 pub enum DovecotLoadArg {
     FileExists(BTreeMap<MaildirPath, bool>),
@@ -63,27 +54,36 @@ impl DovecotLoad {
             state: State::Probe,
         }
     }
+}
 
-    pub fn resume(&mut self, arg: Option<DovecotLoadArg>) -> DovecotLoadResult {
+impl MaildirCoroutine for DovecotLoad {
+    type Arg = DovecotLoadArg;
+    type Output = BTreeMap<char, String>;
+    type Error = DovecotLoadError;
+
+    fn resume(
+        &mut self,
+        arg: Option<Self::Arg>,
+    ) -> MaildirCoroutineState<Self::Output, Self::Error> {
         match (&self.state, arg) {
             (State::Probe, None) => {
                 let mut paths = BTreeSet::new();
                 paths.insert(self.path.clone());
                 trace!("wants dovecot-keywords probe at {}", self.path);
-                DovecotLoadResult::WantsFileExists(paths)
+                MaildirCoroutineState::WantsFileExists(paths)
             }
             (State::Probe, Some(DovecotLoadArg::FileExists(map))) => {
                 let exists = map.get(&self.path).copied().unwrap_or(false);
                 if !exists {
                     self.state = State::Done;
                     trace!("no dovecot-keywords at {}", self.path);
-                    return DovecotLoadResult::Ok(BTreeMap::new());
+                    return MaildirCoroutineState::Done(BTreeMap::new());
                 }
 
                 let mut paths = BTreeSet::new();
                 paths.insert(self.path.clone());
                 self.state = State::Read;
-                DovecotLoadResult::WantsFileRead(paths)
+                MaildirCoroutineState::WantsFileRead(paths)
             }
             (State::Read, Some(DovecotLoadArg::FileRead(mut map))) => {
                 let bytes = map.remove(&self.path).unwrap_or_default();
@@ -91,9 +91,9 @@ impl DovecotLoad {
                 let table = parse_dovecot_keywords(text);
                 self.state = State::Done;
                 trace!("loaded {} dovecot-keywords entries", table.len());
-                DovecotLoadResult::Ok(table)
+                MaildirCoroutineState::Done(table)
             }
-            (_, arg) => DovecotLoadResult::Err(DovecotLoadError::Invalid(arg)),
+            (_, arg) => MaildirCoroutineState::Err(DovecotLoadError::Invalid(arg)),
         }
     }
 }
