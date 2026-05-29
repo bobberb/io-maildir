@@ -14,13 +14,8 @@ const FILENAME: &str = "dovecot-keywords";
 
 #[derive(Clone, Debug, Error)]
 pub enum DovecotStoreError {
-    #[error("invalid dovecot store arg: {0:?}")]
-    Invalid(Option<DovecotStoreArg>),
-}
-
-#[derive(Clone, Debug)]
-pub enum DovecotStoreArg {
-    FileCreate,
+    #[error("invalid dovecot store reply: {0:?}")]
+    Invalid(Option<MaildirReply>),
 }
 
 #[derive(Debug, Default)]
@@ -52,14 +47,13 @@ impl DovecotStore {
 }
 
 impl MaildirCoroutine for DovecotStore {
-    type Arg = DovecotStoreArg;
-    type Output = ();
-    type Error = DovecotStoreError;
+    type Yield = MaildirYield;
+    type Return = Result<(), DovecotStoreError>;
 
     fn resume(
         &mut self,
-        arg: Option<Self::Arg>,
-    ) -> MaildirCoroutineState<Self::Output, Self::Error> {
+        arg: Option<MaildirReply>,
+    ) -> MaildirCoroutineState<Self::Yield, Self::Return> {
         match (&self.state, arg, self.payload.take()) {
             (State::Pending, None, Some(payload)) => {
                 trace!(
@@ -70,13 +64,13 @@ impl MaildirCoroutine for DovecotStore {
                 let mut map = BTreeMap::new();
                 map.insert(self.path.clone(), payload);
                 self.state = State::Awaiting;
-                MaildirCoroutineState::WantsFileCreate(map)
+                MaildirCoroutineState::Yielded(MaildirYield::WantsFileCreate(map))
             }
-            (State::Awaiting, Some(DovecotStoreArg::FileCreate), _) => {
+            (State::Awaiting, Some(MaildirReply::FileCreate), _) => {
                 self.state = State::Done;
-                MaildirCoroutineState::Done(())
+                MaildirCoroutineState::Complete(Ok(()))
             }
-            (_, arg, _) => MaildirCoroutineState::Err(DovecotStoreError::Invalid(arg)),
+            (_, arg, _) => MaildirCoroutineState::Complete(Err(DovecotStoreError::Invalid(arg))),
         }
     }
 }

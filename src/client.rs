@@ -139,27 +139,69 @@ impl MaildirClient {
         &self.root
     }
 
-    /// Drives any [`MaildirCoroutine`] to completion. The `handler`
-    /// closure receives each non-terminal [`MaildirCoroutineState`]
-    /// variant and returns the [`Arg`](MaildirCoroutine::Arg) to
-    /// feed back. Variants the coroutine never emits can be matched
-    /// with an `unreachable!()` arm.
-    pub fn run<C, F>(
-        &self,
-        mut coroutine: C,
-        mut handler: F,
-    ) -> Result<C::Output, MaildirClientError>
+    /// Drives any standard-shape coroutine (`Yield = MaildirYield`,
+    /// `Return = Result<Output, Error>`) against the local filesystem
+    /// until it terminates. Each [`MaildirYield`] variant is
+    /// translated into the corresponding [`std::fs`] call (or env
+    /// lookup) and its [`MaildirReply`] is fed back on the next
+    /// resume.
+    pub fn run<C, T, E>(&self, mut coroutine: C) -> Result<T, MaildirClientError>
     where
-        C: MaildirCoroutine,
-        MaildirClientError: From<C::Error>,
-        F: FnMut(MaildirCoroutineState<C::Output, C::Error>) -> Result<C::Arg, MaildirClientError>,
+        C: MaildirCoroutine<Yield = MaildirYield, Return = Result<T, E>>,
+        MaildirClientError: From<E>,
     {
-        let mut arg: Option<C::Arg> = None;
+        let mut arg: Option<MaildirReply> = None;
+
         loop {
             match coroutine.resume(arg.take()) {
-                MaildirCoroutineState::Done(out) => return Ok(out),
-                MaildirCoroutineState::Err(err) => return Err(err.into()),
-                other => arg = Some(handler(other)?),
+                MaildirCoroutineState::Complete(Ok(out)) => return Ok(out),
+                MaildirCoroutineState::Complete(Err(err)) => return Err(err.into()),
+                MaildirCoroutineState::Yielded(MaildirYield::WantsFileExists(paths)) => {
+                    arg = Some(MaildirReply::FileExists(file_exists(paths)));
+                }
+                MaildirCoroutineState::Yielded(MaildirYield::WantsDirExists(paths)) => {
+                    arg = Some(MaildirReply::DirExists(dir_exists(paths)));
+                }
+                MaildirCoroutineState::Yielded(MaildirYield::WantsDirRead(paths)) => {
+                    arg = Some(MaildirReply::DirRead(read_dirs(paths)?));
+                }
+                MaildirCoroutineState::Yielded(MaildirYield::WantsFileRead(paths)) => {
+                    arg = Some(MaildirReply::FileRead(read_files(paths)?));
+                }
+                MaildirCoroutineState::Yielded(MaildirYield::WantsFileCreate(files)) => {
+                    write_files(files)?;
+                    arg = Some(MaildirReply::FileCreate);
+                }
+                MaildirCoroutineState::Yielded(MaildirYield::WantsDirCreate(paths)) => {
+                    create_dirs(paths)?;
+                    arg = Some(MaildirReply::DirCreate);
+                }
+                MaildirCoroutineState::Yielded(MaildirYield::WantsDirRemove(paths)) => {
+                    remove_dirs(paths)?;
+                    arg = Some(MaildirReply::DirRemove);
+                }
+                MaildirCoroutineState::Yielded(MaildirYield::WantsRename(pairs)) => {
+                    rename_paths(pairs)?;
+                    arg = Some(MaildirReply::Rename);
+                }
+                MaildirCoroutineState::Yielded(MaildirYield::WantsCopy(pairs)) => {
+                    copy_paths(pairs)?;
+                    arg = Some(MaildirReply::Copy);
+                }
+                MaildirCoroutineState::Yielded(MaildirYield::WantsTime) => {
+                    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+                    arg = Some(MaildirReply::Time {
+                        secs: ts.as_secs(),
+                        nanos: ts.subsec_nanos(),
+                    });
+                }
+                MaildirCoroutineState::Yielded(MaildirYield::WantsPid) => {
+                    arg = Some(MaildirReply::Pid(process::id()));
+                }
+                MaildirCoroutineState::Yielded(MaildirYield::WantsHostname) => {
+                    let hostname = gethostname().into_string().unwrap_or_default();
+                    arg = Some(MaildirReply::Hostname(hostname));
+                }
             }
         }
     }
@@ -171,15 +213,7 @@ impl MaildirClient {
         &self,
         maildir: &Maildir,
     ) -> Result<BTreeMap<char, String>, MaildirClientError> {
-        self.run(DovecotLoad::new(maildir), |state| match state {
-            MaildirCoroutineState::WantsFileExists(paths) => {
-                Ok(DovecotLoadArg::FileExists(file_exists(paths)))
-            }
-            MaildirCoroutineState::WantsFileRead(paths) => {
-                Ok(DovecotLoadArg::FileRead(read_files(paths)?))
-            }
-            other => unreachable!("DovecotLoad yielded {other:?}"),
-        })
+        self.run(DovecotLoad::new(maildir))
     }
 
     /// Runs [`DovecotStore`] for `maildir` with the given table.
@@ -188,13 +222,7 @@ impl MaildirClient {
         maildir: &Maildir,
         table: &BTreeMap<char, String>,
     ) -> Result<(), MaildirClientError> {
-        self.run(DovecotStore::new(maildir, table), |state| match state {
-            MaildirCoroutineState::WantsFileCreate(files) => {
-                write_files(files)?;
-                Ok(DovecotStoreArg::FileCreate)
-            }
-            other => unreachable!("DovecotStore yielded {other:?}"),
-        })
+        self.run(DovecotStore::new(maildir, table))
     }
 
     /// Opens an existing Maildir at `path`, validating that
@@ -210,25 +238,13 @@ impl MaildirClient {
 
     /// Runs [`MaildirCreate`]: creates the Maildir at `path`.
     pub fn create_maildir(&self, path: impl Into<MaildirPath>) -> Result<(), MaildirClientError> {
-        self.run(MaildirCreate::new(path), |state| match state {
-            MaildirCoroutineState::WantsDirCreate(paths) => {
-                create_dirs(paths)?;
-                Ok(MaildirCreateArg::DirCreate)
-            }
-            other => unreachable!("MaildirCreate yielded {other:?}"),
-        })
+        self.run(MaildirCreate::new(path))
     }
 
     /// Runs [`MaildirDelete`]: recursively removes the Maildir
     /// rooted at `path`.
     pub fn delete_maildir(&self, path: impl Into<MaildirPath>) -> Result<(), MaildirClientError> {
-        self.run(MaildirDelete::new(path), |state| match state {
-            MaildirCoroutineState::WantsDirRemove(paths) => {
-                remove_dirs(paths)?;
-                Ok(MaildirDeleteArg::DirRemove)
-            }
-            other => unreachable!("MaildirDelete yielded {other:?}"),
-        })
+        self.run(MaildirDelete::new(path))
     }
 
     /// Runs [`MaildirList`]: lists every valid Maildir directly
@@ -241,15 +257,7 @@ impl MaildirClient {
         let coroutine = MaildirList::new(self.root.clone())
             .include_dotted(self.maildir_plus)
             .include_root(self.maildir_plus);
-        self.run(coroutine, |state| match state {
-            MaildirCoroutineState::WantsDirRead(paths) => {
-                Ok(MaildirListArg::DirRead(read_dirs(paths)?))
-            }
-            MaildirCoroutineState::WantsDirExists(paths) => {
-                Ok(MaildirListArg::DirExists(dir_exists(paths)))
-            }
-            other => unreachable!("MaildirList yielded {other:?}"),
-        })
+        self.run(coroutine)
     }
 
     /// Runs [`MaildirRename`]: renames the Maildir at `path` to
@@ -259,13 +267,7 @@ impl MaildirClient {
         path: impl Into<MaildirPath>,
         name: impl ToString,
     ) -> Result<(), MaildirClientError> {
-        self.run(MaildirRename::new(path, name), |state| match state {
-            MaildirCoroutineState::WantsRename(pairs) => {
-                rename_paths(pairs)?;
-                Ok(MaildirRenameArg::Rename)
-            }
-            other => unreachable!("MaildirRename yielded {other:?}"),
-        })
+        self.run(MaildirRename::new(path, name))
     }
 
     // ---- MaildirFlags --------------------------------------------------
@@ -286,22 +288,7 @@ impl MaildirClient {
         mut flags: MaildirFlags,
     ) -> Result<(), MaildirClientError> {
         self.resolve_keywords(&maildir, &mut flags)?;
-        self.run(
-            MaildirFlagsAdd::new(maildir, id, flags),
-            |state| match state {
-                MaildirCoroutineState::WantsFileExists(paths) => {
-                    Ok(MaildirFlagsAddArg::FileExists(file_exists(paths)))
-                }
-                MaildirCoroutineState::WantsDirRead(paths) => {
-                    Ok(MaildirFlagsAddArg::DirRead(read_dirs(paths)?))
-                }
-                MaildirCoroutineState::WantsRename(pairs) => {
-                    rename_paths(pairs)?;
-                    Ok(MaildirFlagsAddArg::Rename)
-                }
-                other => unreachable!("MaildirFlagsAdd yielded {other:?}"),
-            },
-        )
+        self.run(MaildirFlagsAdd::new(maildir, id, flags))
     }
 
     /// Runs [`MaildirFlagsRemove`]: removes `flags` from message
@@ -318,22 +305,7 @@ impl MaildirClient {
         mut flags: MaildirFlags,
     ) -> Result<(), MaildirClientError> {
         self.resolve_keywords(&maildir, &mut flags)?;
-        self.run(
-            MaildirFlagsRemove::new(maildir, id, flags),
-            |state| match state {
-                MaildirCoroutineState::WantsFileExists(paths) => {
-                    Ok(MaildirFlagsRemoveArg::FileExists(file_exists(paths)))
-                }
-                MaildirCoroutineState::WantsDirRead(paths) => {
-                    Ok(MaildirFlagsRemoveArg::DirRead(read_dirs(paths)?))
-                }
-                MaildirCoroutineState::WantsRename(pairs) => {
-                    rename_paths(pairs)?;
-                    Ok(MaildirFlagsRemoveArg::Rename)
-                }
-                other => unreachable!("MaildirFlagsRemove yielded {other:?}"),
-            },
-        )
+        self.run(MaildirFlagsRemove::new(maildir, id, flags))
     }
 
     /// Runs [`MaildirFlagsSet`]: replaces the flags of message `id`
@@ -349,22 +321,7 @@ impl MaildirClient {
         mut flags: MaildirFlags,
     ) -> Result<(), MaildirClientError> {
         self.resolve_keywords(&maildir, &mut flags)?;
-        self.run(
-            MaildirFlagsSet::new(maildir, id, flags),
-            |state| match state {
-                MaildirCoroutineState::WantsFileExists(paths) => {
-                    Ok(MaildirFlagsSetArg::FileExists(file_exists(paths)))
-                }
-                MaildirCoroutineState::WantsDirRead(paths) => {
-                    Ok(MaildirFlagsSetArg::DirRead(read_dirs(paths)?))
-                }
-                MaildirCoroutineState::WantsRename(pairs) => {
-                    rename_paths(pairs)?;
-                    Ok(MaildirFlagsSetArg::Rename)
-                }
-                other => unreachable!("MaildirFlagsSet yielded {other:?}"),
-            },
-        )
+        self.run(MaildirFlagsSet::new(maildir, id, flags))
     }
 
     // ---- Messages -----------------------------------------------
@@ -377,22 +334,11 @@ impl MaildirClient {
         maildir: Maildir,
         id: impl ToString,
     ) -> Result<(MaildirPath, MaildirSubdir, MaildirFlags), MaildirClientError> {
-        let MaildirMessageLocateOk {
+        let MaildirMessageLocateOutput {
             path,
             subdir,
             flags,
-        } = self.run(
-            MaildirMessageLocate::new(maildir, id),
-            |state| match state {
-                MaildirCoroutineState::WantsFileExists(paths) => {
-                    Ok(MaildirMessageLocateArg::FileExists(file_exists(paths)))
-                }
-                MaildirCoroutineState::WantsDirRead(paths) => {
-                    Ok(MaildirMessageLocateArg::DirRead(read_dirs(paths)?))
-                }
-                other => unreachable!("MaildirMessageLocate yielded {other:?}"),
-            },
-        )?;
+        } = self.run(MaildirMessageLocate::new(maildir, id))?;
         Ok((path, subdir, flags))
     }
 
@@ -403,18 +349,7 @@ impl MaildirClient {
         maildir: Maildir,
         id: impl ToString,
     ) -> Result<MaildirMessage, MaildirClientError> {
-        self.run(MaildirMessageGet::new(maildir, id), |state| match state {
-            MaildirCoroutineState::WantsFileExists(paths) => {
-                Ok(MaildirMessageGetArg::FileExists(file_exists(paths)))
-            }
-            MaildirCoroutineState::WantsDirRead(paths) => {
-                Ok(MaildirMessageGetArg::DirRead(read_dirs(paths)?))
-            }
-            MaildirCoroutineState::WantsFileRead(paths) => {
-                Ok(MaildirMessageGetArg::FileRead(read_files(paths)?))
-            }
-            other => unreachable!("MaildirMessageGet yielded {other:?}"),
-        })
+        self.run(MaildirMessageGet::new(maildir, id))
     }
 
     /// Runs [`MaildirMessagesList`]: scans both `/new` and `/cur`
@@ -426,15 +361,7 @@ impl MaildirClient {
         &self,
         maildir: Maildir,
     ) -> Result<BTreeSet<MaildirEntry>, MaildirClientError> {
-        self.run(MaildirMessagesList::new(maildir), |state| match state {
-            MaildirCoroutineState::WantsDirRead(paths) => {
-                Ok(MaildirMessagesListArg::DirRead(read_dirs(paths)?))
-            }
-            MaildirCoroutineState::WantsFileExists(paths) => {
-                Ok(MaildirMessagesListArg::FileExists(file_exists(paths)))
-            }
-            other => unreachable!("MaildirMessagesList yielded {other:?}"),
-        })
+        self.run(MaildirMessagesList::new(maildir))
     }
 
     /// Reads the file backing `entry` and returns it as a
@@ -566,32 +493,8 @@ impl MaildirClient {
             }
         }
 
-        let MaildirMessageStoreOk { id, path } = self.run(
-            MaildirMessageStore::new(maildir, subdir, flags, contents),
-            |state| match state {
-                MaildirCoroutineState::WantsTime => {
-                    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-                    Ok(MaildirMessageStoreArg::Time {
-                        secs: ts.as_secs(),
-                        nanos: ts.subsec_nanos(),
-                    })
-                }
-                MaildirCoroutineState::WantsPid => Ok(MaildirMessageStoreArg::Pid(process::id())),
-                MaildirCoroutineState::WantsHostname => {
-                    let hostname = gethostname().into_string().unwrap_or_default();
-                    Ok(MaildirMessageStoreArg::Hostname(hostname))
-                }
-                MaildirCoroutineState::WantsFileCreate(files) => {
-                    write_files(files)?;
-                    Ok(MaildirMessageStoreArg::FileCreate)
-                }
-                MaildirCoroutineState::WantsRename(pairs) => {
-                    rename_paths(pairs)?;
-                    Ok(MaildirMessageStoreArg::Rename)
-                }
-                other => unreachable!("MaildirMessageStore yielded {other:?}"),
-            },
-        )?;
+        let MaildirMessageStoreOutput { id, path } =
+            self.run(MaildirMessageStore::new(maildir, subdir, flags, contents))?;
         Ok((id, path))
     }
 
@@ -604,22 +507,7 @@ impl MaildirClient {
         target: Maildir,
         target_subdir: Option<MaildirSubdir>,
     ) -> Result<(), MaildirClientError> {
-        self.run(
-            MaildirMessageCopy::new(id, source, target, target_subdir),
-            |state| match state {
-                MaildirCoroutineState::WantsFileExists(paths) => {
-                    Ok(MaildirMessageCopyArg::FileExists(file_exists(paths)))
-                }
-                MaildirCoroutineState::WantsDirRead(paths) => {
-                    Ok(MaildirMessageCopyArg::DirRead(read_dirs(paths)?))
-                }
-                MaildirCoroutineState::WantsCopy(pairs) => {
-                    copy_paths(pairs)?;
-                    Ok(MaildirMessageCopyArg::Copy)
-                }
-                other => unreachable!("MaildirMessageCopy yielded {other:?}"),
-            },
-        )
+        self.run(MaildirMessageCopy::new(id, source, target, target_subdir))
     }
 
     /// Projects every [`MaildirFlag::Keyword`] out of `flags`,
@@ -672,22 +560,7 @@ impl MaildirClient {
         target: Maildir,
         target_subdir: Option<MaildirSubdir>,
     ) -> Result<(), MaildirClientError> {
-        self.run(
-            MaildirMessageMove::new(id, source, target, target_subdir),
-            |state| match state {
-                MaildirCoroutineState::WantsFileExists(paths) => {
-                    Ok(MaildirMessageMoveArg::FileExists(file_exists(paths)))
-                }
-                MaildirCoroutineState::WantsDirRead(paths) => {
-                    Ok(MaildirMessageMoveArg::DirRead(read_dirs(paths)?))
-                }
-                MaildirCoroutineState::WantsRename(pairs) => {
-                    rename_paths(pairs)?;
-                    Ok(MaildirMessageMoveArg::Rename)
-                }
-                other => unreachable!("MaildirMessageMove yielded {other:?}"),
-            },
-        )
+        self.run(MaildirMessageMove::new(id, source, target, target_subdir))
     }
 }
 

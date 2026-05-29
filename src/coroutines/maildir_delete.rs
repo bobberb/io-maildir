@@ -10,15 +10,8 @@ use crate::{coroutine::*, path::MaildirPath};
 /// Errors that can occur during the coroutine progression.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirDeleteError {
-    #[error("invalid Maildir delete arg: {0:?}")]
-    Invalid(Option<MaildirDeleteArg>),
-}
-
-/// Argument fed back into [`MaildirDelete`].
-#[derive(Clone, Debug)]
-pub enum MaildirDeleteArg {
-    /// Response to [`MaildirCoroutineState::WantsDirRemove`].
-    DirRemove,
+    #[error("invalid Maildir delete reply: {0:?}")]
+    Invalid(Option<MaildirReply>),
 }
 
 /// I/O-free coroutine to delete a Maildir and all its contents.
@@ -39,26 +32,25 @@ impl MaildirDelete {
 }
 
 impl MaildirCoroutine for MaildirDelete {
-    type Arg = MaildirDeleteArg;
-    type Output = ();
-    type Error = MaildirDeleteError;
+    type Yield = MaildirYield;
+    type Return = Result<(), MaildirDeleteError>;
 
     fn resume(
         &mut self,
-        arg: Option<Self::Arg>,
-    ) -> MaildirCoroutineState<Self::Output, Self::Error> {
+        arg: Option<MaildirReply>,
+    ) -> MaildirCoroutineState<Self::Yield, Self::Return> {
         match (self.wants_dir_remove.take(), arg) {
             (Some(paths), None) => {
                 trace!("wants remove of {} directories", paths.len());
-                MaildirCoroutineState::WantsDirRemove(paths)
+                MaildirCoroutineState::Yielded(MaildirYield::WantsDirRemove(paths))
             }
-            (None, Some(MaildirDeleteArg::DirRemove)) => {
+            (None, Some(MaildirReply::DirRemove)) => {
                 trace!("maildir removed");
-                MaildirCoroutineState::Done(())
+                MaildirCoroutineState::Complete(Ok(()))
             }
             (_, arg) => {
                 let err = MaildirDeleteError::Invalid(arg);
-                MaildirCoroutineState::Err(err)
+                MaildirCoroutineState::Complete(Err(err))
             }
         }
     }

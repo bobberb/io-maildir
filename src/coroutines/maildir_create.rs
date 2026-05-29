@@ -14,15 +14,8 @@ use crate::{
 /// Errors that can occur during the coroutine progression.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirCreateError {
-    #[error("invalid Maildir create arg: {0:?}")]
-    Invalid(Option<MaildirCreateArg>),
-}
-
-/// Argument fed back into [`MaildirCreate`].
-#[derive(Clone, Debug)]
-pub enum MaildirCreateArg {
-    /// Response to [`MaildirCoroutineState::WantsDirCreate`].
-    DirCreate,
+    #[error("invalid Maildir create reply: {0:?}")]
+    Invalid(Option<MaildirReply>),
 }
 
 /// I/O-free coroutine to create a Maildir with its `cur`, `new` and
@@ -54,26 +47,25 @@ impl MaildirCreate {
 }
 
 impl MaildirCoroutine for MaildirCreate {
-    type Arg = MaildirCreateArg;
-    type Output = ();
-    type Error = MaildirCreateError;
+    type Yield = MaildirYield;
+    type Return = Result<(), MaildirCreateError>;
 
     fn resume(
         &mut self,
-        arg: Option<Self::Arg>,
-    ) -> MaildirCoroutineState<Self::Output, Self::Error> {
+        arg: Option<MaildirReply>,
+    ) -> MaildirCoroutineState<Self::Yield, Self::Return> {
         match (self.wants_dir_create.take(), arg) {
             (Some(paths), None) => {
                 trace!("wants create of {} directories", paths.len());
-                MaildirCoroutineState::WantsDirCreate(paths)
+                MaildirCoroutineState::Yielded(MaildirYield::WantsDirCreate(paths))
             }
-            (None, Some(MaildirCreateArg::DirCreate)) => {
+            (None, Some(MaildirReply::DirCreate)) => {
                 trace!("maildir created");
-                MaildirCoroutineState::Done(())
+                MaildirCoroutineState::Complete(Ok(()))
             }
             (_, arg) => {
                 let err = MaildirCreateError::Invalid(arg);
-                MaildirCoroutineState::Err(err)
+                MaildirCoroutineState::Complete(Err(err))
             }
         }
     }

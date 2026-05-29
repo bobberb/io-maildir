@@ -10,15 +10,8 @@ use crate::{coroutine::*, path::MaildirPath};
 /// Errors that can occur during the coroutine progression.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirRenameError {
-    #[error("invalid Maildir rename arg: {0:?}")]
-    Invalid(Option<MaildirRenameArg>),
-}
-
-/// Argument fed back into [`MaildirRename`].
-#[derive(Clone, Debug)]
-pub enum MaildirRenameArg {
-    /// Response to [`MaildirCoroutineState::WantsRename`].
-    Rename,
+    #[error("invalid Maildir rename reply: {0:?}")]
+    Invalid(Option<MaildirReply>),
 }
 
 /// I/O-free coroutine to rename a Maildir directory.
@@ -41,26 +34,25 @@ impl MaildirRename {
 }
 
 impl MaildirCoroutine for MaildirRename {
-    type Arg = MaildirRenameArg;
-    type Output = ();
-    type Error = MaildirRenameError;
+    type Yield = MaildirYield;
+    type Return = Result<(), MaildirRenameError>;
 
     fn resume(
         &mut self,
-        arg: Option<Self::Arg>,
-    ) -> MaildirCoroutineState<Self::Output, Self::Error> {
+        arg: Option<MaildirReply>,
+    ) -> MaildirCoroutineState<Self::Yield, Self::Return> {
         match (self.wants_rename.take(), arg) {
             (Some(pairs), None) => {
                 trace!("wants rename of {} path(s)", pairs.len());
-                MaildirCoroutineState::WantsRename(pairs)
+                MaildirCoroutineState::Yielded(MaildirYield::WantsRename(pairs))
             }
-            (None, Some(MaildirRenameArg::Rename)) => {
+            (None, Some(MaildirReply::Rename)) => {
                 trace!("maildir renamed");
-                MaildirCoroutineState::Done(())
+                MaildirCoroutineState::Complete(Ok(()))
             }
             (_, arg) => {
                 let err = MaildirRenameError::Invalid(arg);
-                MaildirCoroutineState::Err(err)
+                MaildirCoroutineState::Complete(Err(err))
             }
         }
     }

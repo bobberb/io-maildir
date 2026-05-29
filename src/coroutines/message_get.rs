@@ -2,11 +2,7 @@
 
 use core::mem;
 
-use alloc::{
-    collections::{BTreeMap, BTreeSet},
-    string::ToString,
-    vec::Vec,
-};
+use alloc::{collections::BTreeSet, string::ToString};
 
 use log::trace;
 use thiserror::Error;
@@ -19,8 +15,8 @@ use crate::{
 /// Errors that can occur during the coroutine progression.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirMessageGetError {
-    #[error("invalid Maildir message get arg {0:?} for state {1:?}")]
-    Invalid(Option<MaildirMessageGetArg>, State),
+    #[error("invalid Maildir message get reply {0:?} for state {1:?}")]
+    Invalid(Option<MaildirReply>, State),
 
     #[error(transparent)]
     Locate(#[from] MaildirMessageLocateError),
@@ -33,19 +29,6 @@ pub enum State {
     Read(MaildirPath),
     #[default]
     Invalid,
-}
-
-/// Argument fed back into [`MaildirMessageGet`].
-#[derive(Clone, Debug)]
-pub enum MaildirMessageGetArg {
-    /// Forwarded to the inner locate coroutine.
-    FileExists(BTreeMap<MaildirPath, bool>),
-
-    /// Forwarded to the inner locate coroutine.
-    DirRead(BTreeMap<MaildirPath, BTreeSet<MaildirPath>>),
-
-    /// Response to [`MaildirCoroutineState::WantsFileRead`].
-    FileRead(BTreeMap<MaildirPath, Vec<u8>>),
 }
 
 /// I/O-free coroutine to get a single Maildir message by its ID.
@@ -65,60 +48,41 @@ impl MaildirMessageGet {
 }
 
 impl MaildirCoroutine for MaildirMessageGet {
-    type Arg = MaildirMessageGetArg;
-    type Output = MaildirMessage;
-    type Error = MaildirMessageGetError;
+    type Yield = MaildirYield;
+    type Return = Result<MaildirMessage, MaildirMessageGetError>;
 
     fn resume(
         &mut self,
-        arg: Option<Self::Arg>,
-    ) -> MaildirCoroutineState<Self::Output, Self::Error> {
+        arg: Option<MaildirReply>,
+    ) -> MaildirCoroutineState<Self::Yield, Self::Return> {
         match (mem::take(&mut self.state), arg) {
-            (State::Locate(mut c), arg) => {
-                let locate_arg = match arg {
-                    None => None,
-                    Some(MaildirMessageGetArg::FileExists(probes)) => {
-                        Some(MaildirMessageLocateArg::FileExists(probes))
-                    }
-                    Some(MaildirMessageGetArg::DirRead(entries)) => {
-                        Some(MaildirMessageLocateArg::DirRead(entries))
-                    }
-                    Some(other) => {
-                        let state = State::Locate(c);
-                        let err = MaildirMessageGetError::Invalid(Some(other), state);
-                        return MaildirCoroutineState::Err(err);
-                    }
-                };
+            (State::Locate(mut c), arg) => match c.resume(arg) {
+                MaildirCoroutineState::Complete(Ok(MaildirMessageLocateOutput {
+                    path, ..
+                })) => {
+                    trace!("located message at {path}");
 
-                match c.resume(locate_arg) {
-                    MaildirCoroutineState::Done(MaildirMessageLocateOk { path, .. }) => {
-                        trace!("located message at {path}");
-
-                        let paths = BTreeSet::from_iter([path.clone()]);
-                        self.state = State::Read(path);
-                        MaildirCoroutineState::WantsFileRead(paths)
-                    }
-                    MaildirCoroutineState::WantsFileExists(probes) => {
-                        self.state = State::Locate(c);
-                        MaildirCoroutineState::WantsFileExists(probes)
-                    }
-                    MaildirCoroutineState::WantsDirRead(paths) => {
-                        self.state = State::Locate(c);
-                        MaildirCoroutineState::WantsDirRead(paths)
-                    }
-                    MaildirCoroutineState::Err(err) => MaildirCoroutineState::Err(err.into()),
-                    other => unreachable!("MaildirMessageLocate yielded {other:?}"),
+                    let paths = BTreeSet::from_iter([path.clone()]);
+                    self.state = State::Read(path);
+                    MaildirCoroutineState::Yielded(MaildirYield::WantsFileRead(paths))
                 }
-            }
-            (State::Read(path), Some(MaildirMessageGetArg::FileRead(map))) => {
+                MaildirCoroutineState::Yielded(y) => {
+                    self.state = State::Locate(c);
+                    MaildirCoroutineState::Yielded(y)
+                }
+                MaildirCoroutineState::Complete(Err(err)) => {
+                    MaildirCoroutineState::Complete(Err(err.into()))
+                }
+            },
+            (State::Read(path), Some(MaildirReply::FileRead(map))) => {
                 trace!("read message contents at {path}");
 
                 let contents = map.into_values().next().unwrap_or_default();
-                MaildirCoroutineState::Done(MaildirMessage::from((path, contents)))
+                MaildirCoroutineState::Complete(Ok(MaildirMessage::from((path, contents))))
             }
             (state, arg) => {
                 let err = MaildirMessageGetError::Invalid(arg, state);
-                MaildirCoroutineState::Err(err)
+                MaildirCoroutineState::Complete(Err(err))
             }
         }
     }

@@ -1,6 +1,6 @@
 # I/O Maildir [![Documentation](https://img.shields.io/docsrs/io-maildir?style=flat&logo=docs.rs&logoColor=white)](https://docs.rs/io-maildir/latest/io_maildir) [![Matrix](https://img.shields.io/badge/chat-%23pimalaya-blue?style=flat&logo=matrix&logoColor=white)](https://matrix.to/#/#pimalaya:matrix.org) [![Mastodon](https://img.shields.io/badge/news-%40pimalaya-blue?style=flat&logo=mastodon&logoColor=white)](https://fosstodon.org/@pimalaya)
 
-Maildir client library, written in Rust.
+Maildir client library, written in Rust
 
 This library is composed of 2 feature-gated layers:
 
@@ -58,12 +58,12 @@ This library implements the [Maildir](https://en.wikipedia.org/wiki/Maildir) for
 
 I/O Maildir can be consumed two ways, depending on how much of the I/O stack you want to own. Each mode is gated by cargo features.
 
-Whichever mode you pick, every coroutine implements the `MaildirCoroutine` trait. Its `resume(arg: Option<Arg>)` method returns `MaildirCoroutineState<Output, Error>` with three terminal shapes plus filesystem (and environment) request variants:
+Whichever mode you pick, every coroutine implements the `MaildirCoroutine` trait. Its `resume(arg: Option<MaildirReply>)` method returns a `MaildirCoroutineState<Yield, Return>` with two variants:
 
-- `WantsTime`, `WantsPid`, `WantsHostname`: caller supplies the current Unix time, process id, or host name. Used by the message-store coroutine to mint IDs.
-- `WantsDirCreate`, `WantsDirRead`, `WantsDirRemove`, `WantsDirExists`, `WantsFileCreate`, `WantsFileRead`, `WantsFileExists`, `WantsRename`, `WantsCopy`: caller performs the matching filesystem operation and feeds back the corresponding `Arg::*` variant.
-- `Done(Output)`: terminal success carrying the coroutine's `Output` payload.
-- `Err(Error)`: terminal failure.
+- `Yielded(Y)`: intermediate. `Y` is `MaildirYield`, mixing filesystem step requests (`WantsDirCreate`, `WantsDirRead`, `WantsDirRemove`, `WantsDirExists`, `WantsFileCreate`, `WantsFileRead`, `WantsFileExists`, `WantsRename`, `WantsCopy`) with the three environmental inputs used by the delivery protocol to mint message identifiers (`WantsTime`, `WantsPid`, `WantsHostname`).
+- `Complete(R)`: terminal. By convention `R = Result<Output, Error>` carrying the operation's final value.
+
+The driver answers each `Yielded(MaildirYield::Wants*)` with the matching `MaildirReply` variant on the next resume.
 
 ### I/O-free coroutines
 
@@ -79,19 +79,19 @@ use io_maildir::{coroutine::*, coroutines::maildir_create::*, path::MaildirPath}
 let root = MaildirPath::new("/path/to/maildir");
 
 let mut coroutine = MaildirCreate::new(root);
-let mut arg: Option<MaildirCreateArg> = None;
+let mut arg: Option<MaildirReply> = None;
 
 loop {
     match coroutine.resume(arg.take()) {
-        MaildirCoroutineState::Done(()) => break,
-        MaildirCoroutineState::WantsDirCreate(paths) => {
+        MaildirCoroutineState::Complete(Ok(())) => break,
+        MaildirCoroutineState::Complete(Err(err)) => panic!("{err}"),
+        MaildirCoroutineState::Yielded(MaildirYield::WantsDirCreate(paths)) => {
             for path in paths {
                 fs::create_dir_all(path.as_str()).unwrap();
             }
-            arg = Some(MaildirCreateArg::DirCreate);
+            arg = Some(MaildirReply::DirCreate);
         }
-        MaildirCoroutineState::Err(err) => panic!("{err}"),
-        other => unreachable!("MaildirCreate yielded {other:?}"),
+        MaildirCoroutineState::Yielded(other) => unreachable!("MaildirCreate yielded {other:?}"),
     }
 }
 ```
@@ -117,35 +117,35 @@ let maildir = Maildir::from_path(MaildirPath::new("/path/to/maildir"));
 let contents = b"From: alice@example.com\r\nSubject: Hello\r\n\r\nHello!\r\n".to_vec();
 
 let mut coroutine = MaildirMessageStore::new(maildir, MaildirSubdir::New, MaildirFlags::default(), contents);
-let mut arg: Option<MaildirMessageStoreArg> = None;
+let mut arg: Option<MaildirReply> = None;
 
-let MaildirMessageStoreOk { id, path } = loop {
+let MaildirMessageStoreOutput { id, path } = loop {
     match coroutine.resume(arg.take()) {
-        MaildirCoroutineState::Done(ok) => break ok,
-        MaildirCoroutineState::WantsTime => {
+        MaildirCoroutineState::Complete(Ok(out)) => break out,
+        MaildirCoroutineState::Complete(Err(err)) => panic!("{err}"),
+        MaildirCoroutineState::Yielded(MaildirYield::WantsTime) => {
             let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-            arg = Some(MaildirMessageStoreArg::Time { secs: ts.as_secs(), nanos: ts.subsec_nanos() });
+            arg = Some(MaildirReply::Time { secs: ts.as_secs(), nanos: ts.subsec_nanos() });
         }
-        MaildirCoroutineState::WantsPid => {
-            arg = Some(MaildirMessageStoreArg::Pid(process::id()));
+        MaildirCoroutineState::Yielded(MaildirYield::WantsPid) => {
+            arg = Some(MaildirReply::Pid(process::id()));
         }
-        MaildirCoroutineState::WantsHostname => {
-            arg = Some(MaildirMessageStoreArg::Hostname(gethostname().into_string().unwrap_or_default()));
+        MaildirCoroutineState::Yielded(MaildirYield::WantsHostname) => {
+            arg = Some(MaildirReply::Hostname(gethostname().into_string().unwrap_or_default()));
         }
-        MaildirCoroutineState::WantsFileCreate(files) => {
+        MaildirCoroutineState::Yielded(MaildirYield::WantsFileCreate(files)) => {
             for (path, bytes) in files {
                 fs::write(path.as_str(), &bytes).unwrap();
             }
-            arg = Some(MaildirMessageStoreArg::FileCreate);
+            arg = Some(MaildirReply::FileCreate);
         }
-        MaildirCoroutineState::WantsRename(pairs) => {
+        MaildirCoroutineState::Yielded(MaildirYield::WantsRename(pairs)) => {
             for (from, to) in pairs {
                 fs::rename(from.as_str(), to.as_str()).unwrap();
             }
-            arg = Some(MaildirMessageStoreArg::Rename);
+            arg = Some(MaildirReply::Rename);
         }
-        MaildirCoroutineState::Err(err) => panic!("{err}"),
-        other => unreachable!("MaildirMessageStore yielded {other:?}"),
+        MaildirCoroutineState::Yielded(other) => unreachable!("MaildirMessageStore yielded {other:?}"),
     }
 };
 
