@@ -13,17 +13,16 @@ documentation = "https://docs.rs/io-maildir/latest/io_maildir"
 repository = "https://github.com/pimalaya/io-maildir"
 
 [package.metadata.docs.rs]
-all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["client"]
+default = ["client", "parser", "serde"]
 client = ["dep:gethostname"]
 parser = ["dep:mail-parser"]
 serde = ["mail-parser?/serde"]
 
 [[example]]
-name = "std_store_message"
+name = "std_store_entry"
 required-features = ["client"]
 
 [dev-dependencies]

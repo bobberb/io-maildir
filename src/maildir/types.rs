@@ -10,20 +10,17 @@ use alloc::string::String;
 
 use thiserror::Error;
 
-use crate::path::MaildirPath;
+use crate::path::FsPath;
 
+/// Failure causes when validating a Maildir on disk.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirError {
-    /// The given path is not a directory.
     #[error("path {0} is not a directory")]
-    NotDir(MaildirPath),
+    NotDir(FsPath),
 
-    /// The directory does not look like a Maildir (missing `cur`,
-    /// `new`, or `tmp` subdirectory).
     #[error("missing {0}/ subdirectory at Maildir {1}")]
-    MissingSubdir(&'static str, MaildirPath),
+    MissingSubdir(&'static str, FsPath),
 
-    /// The name does not match `cur`, `new`, or `tmp`.
     #[error("invalid Maildir subdir {0:?}: expected cur, new or tmp")]
     InvalidSubdir(String),
 }
@@ -32,6 +29,7 @@ pub const CUR: &str = "cur";
 pub const NEW: &str = "new";
 pub const TMP: &str = "tmp";
 
+/// One of the three Maildir subdirectories: cur, new, tmp.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MaildirSubdir {
     Cur,
@@ -62,26 +60,19 @@ impl fmt::Display for MaildirSubdir {
     }
 }
 
-/// A Maildir on the filesystem.
-///
-/// Represents a directory with the standard `cur`, `new`, and `tmp`
-/// subdirectories. Use [`MaildirCreate`] to initialise one and the
-/// client `load_maildir` helper to open an existing one.
-///
-/// [`MaildirCreate`]: crate::coroutines::maildir_create::MaildirCreate
+/// A Maildir root on the filesystem (with cur/new/tmp subdirs).
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Maildir {
-    root: MaildirPath,
+    root: FsPath,
 }
 
 impl Maildir {
-    /// Builds a [`Maildir`] from `root` without checking the
-    /// subdirectories exist.
-    pub fn from_path(root: impl Into<MaildirPath>) -> Self {
+    /// Wraps `root` without checking that the subdirectories exist.
+    pub fn from_path(root: impl Into<FsPath>) -> Self {
         Self { root: root.into() }
     }
 
-    pub fn path(&self) -> &MaildirPath {
+    pub fn path(&self) -> &FsPath {
         &self.root
     }
 
@@ -89,7 +80,7 @@ impl Maildir {
         self.root.file_name()
     }
 
-    pub fn subdir(&self, subdir: &MaildirSubdir) -> MaildirPath {
+    pub fn subdir(&self, subdir: &MaildirSubdir) -> FsPath {
         match subdir {
             MaildirSubdir::Cur => self.cur(),
             MaildirSubdir::New => self.new(),
@@ -97,15 +88,15 @@ impl Maildir {
         }
     }
 
-    pub fn cur(&self) -> MaildirPath {
+    pub fn cur(&self) -> FsPath {
         self.root.join(CUR)
     }
 
-    pub fn new(&self) -> MaildirPath {
+    pub fn new(&self) -> FsPath {
         self.root.join(NEW)
     }
 
-    pub fn tmp(&self) -> MaildirPath {
+    pub fn tmp(&self) -> FsPath {
         self.root.join(TMP)
     }
 }
@@ -116,14 +107,14 @@ impl Hash for Maildir {
     }
 }
 
-impl AsRef<MaildirPath> for Maildir {
-    fn as_ref(&self) -> &MaildirPath {
+impl AsRef<FsPath> for Maildir {
+    fn as_ref(&self) -> &FsPath {
         &self.root
     }
 }
 
-impl From<MaildirPath> for Maildir {
-    fn from(root: MaildirPath) -> Self {
+impl From<FsPath> for Maildir {
+    fn from(root: FsPath) -> Self {
         Self { root }
     }
 }

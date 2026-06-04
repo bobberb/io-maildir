@@ -1,27 +1,29 @@
+//! Maildir flag set: IANA letter flags + custom keywords.
+
 use core::fmt;
+use core::fmt::Write as _;
 
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     string::String,
     vec::Vec,
 };
-use core::fmt::Write as _;
 
 use log::trace;
 
-use crate::path::MaildirPath;
+use crate::path::FsPath;
 
+/// A set of Maildir flags plus opaque info-section letters.
 #[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct MaildirFlags {
     flags: BTreeSet<MaildirFlag>,
-    /// Extra info-section letters appended verbatim by [`Display`].
-    /// Used to carry resolved dovecot `a..z` slot letters that have no
-    /// counterpart in the named-variant set.
+    /// Resolved dovecot `a..z` slot letters with no named-variant
+    /// counterpart, appended verbatim by [`fmt::Display`].
     extra_letters: BTreeSet<char>,
 }
 
-impl From<&MaildirPath> for MaildirFlags {
-    fn from(path: &MaildirPath) -> Self {
+impl From<&FsPath> for MaildirFlags {
+    fn from(path: &FsPath) -> Self {
         let Some(file_name) = path.file_name() else {
             return Default::default();
         };
@@ -36,7 +38,7 @@ impl From<&MaildirPath> for MaildirFlags {
 
 impl fmt::Display for MaildirFlags {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // BTreeSet iterates in sorted order so the on-disk
+        // NOTE: BTreeSet iterates in sorted order so the on-disk
         // representation is deterministic.
         for flag in &self.flags {
             write!(f, "{flag}")?;
@@ -83,13 +85,9 @@ impl MaildirFlags {
         self.flags.insert(flag)
     }
 
-    /// Path-only constructor extended with a dovecot-keywords table.
-    ///
-    /// Standard IANA letters (P/R/S/T/D/F) parse as today; lowercase
-    /// `a..z` letters resolve through `table` and produce
-    /// [`MaildirFlag::Keyword`] entries. Letters absent from the table
-    /// are dropped.
-    pub fn with_dovecot(path: &MaildirPath, table: &BTreeMap<char, String>) -> Self {
+    /// Like [`From<&MaildirPath>`] but resolves lowercase `a..z`
+    /// letters through a dovecot-keywords table.
+    pub fn with_dovecot(path: &FsPath, table: &BTreeMap<char, String>) -> Self {
         let Some(file_name) = path.file_name() else {
             return Default::default();
         };
@@ -114,7 +112,7 @@ impl MaildirFlags {
         }
     }
 
-    /// Adds raw keyword strings to the set as [`MaildirFlag::Keyword`].
+    /// Adds raw keyword strings as [`MaildirFlag::Keyword`] entries.
     pub fn extend_keywords<I, S>(&mut self, keywords: I)
     where
         I: IntoIterator<Item = S>,
@@ -125,9 +123,8 @@ impl MaildirFlags {
         }
     }
 
-    /// Appends raw info-section letters that will be written verbatim
-    /// by [`fmt::Display`]. Use it for dovecot `a..z` slot letters
-    /// already resolved at the caller.
+    /// Appends raw info-section letters written verbatim by
+    /// [`fmt::Display`] (typically resolved dovecot slot letters).
     pub fn extend_letters<I>(&mut self, letters: I)
     where
         I: IntoIterator<Item = char>,
@@ -135,9 +132,8 @@ impl MaildirFlags {
         self.extra_letters.extend(letters);
     }
 
-    /// Drains every [`MaildirFlag::Keyword`] variant out of the set,
-    /// returning the collected keyword strings in deterministic
-    /// (lexicographic) order.
+    /// Drains every [`MaildirFlag::Keyword`] variant out, returning
+    /// the keyword strings in lexicographic order.
     pub fn drain_keywords(&mut self) -> Vec<String> {
         let keywords: BTreeSet<MaildirFlag> = self
             .flags
@@ -169,6 +165,7 @@ impl FromIterator<MaildirFlag> for MaildirFlags {
     }
 }
 
+/// A single Maildir flag: a standard IANA letter or a custom keyword.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum MaildirFlag {
     Passed,
@@ -177,9 +174,8 @@ pub enum MaildirFlag {
     Trashed,
     Draft,
     Flagged,
-    /// Custom keyword that does not map to a Maildir info-section
-    /// letter; serialised externally via the dovecot-keywords file or
-    /// a configured header.
+    /// Custom keyword with no info-section letter; serialised via
+    /// dovecot-keywords or a configured header.
     Keyword(String),
 }
 
@@ -220,18 +216,17 @@ impl fmt::Display for MaildirFlag {
             Self::Trashed => write!(f, "T"),
             Self::Draft => write!(f, "D"),
             Self::Flagged => write!(f, "F"),
-            // NOTE: Keyword has no letter encoding; serialised through
-            // the dovecot-keywords file or a header.
+            // NOTE: Keyword has no letter encoding; serialised via the
+            // dovecot-keywords file or a header instead.
             Self::Keyword(_) => Ok(()),
         }
     }
 }
 
-/// Choice of body header used to ferry custom keywords alongside the
-/// message. Selecting [`KeywordHeader::XKeywords`] follows the
-/// OfflineIMAP / mbsync convention (comma-separated); selecting
-/// [`KeywordHeader::XLabel`] follows the mutt / notmuch convention
-/// (space-separated).
+/// Header used to carry custom keywords inline with the message body.
+///
+/// `XKeywords` follows the OfflineIMAP / mbsync convention (comma-
+/// separated); `XLabel` follows mutt / notmuch (space-separated).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KeywordHeader {
     XKeywords,

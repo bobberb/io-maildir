@@ -24,9 +24,9 @@ This library is composed of 2 feature-gated layers:
 
 - **I/O-free** coroutines: `no_std` state machines; no filesystem calls, no async runtime, no `std` required, drive against any blocking, async, or fuzz harness.
 - Standard, blocking client (requires `client` feature) backed by `std::fs`.
-- **Maildir delivery protocol**: the message-store coroutine writes to `/tmp` first, then atomically renames into `/cur` or `/new`, producing IDs of the shape `secs.#counter.M<nanos>P<pid>.<host>`.
-- **Maildir++** mode: optional dotted folder enumeration (`.Work.Foo`) and inbox surfacing, gated by the `maildir_plus` client knob.
-- **Dovecot keywords** resolution: read / write the `dovecot-keywords` slot table (`a..z` letters), gated by the `dovecot_keywords` client knob.
+- **Maildir delivery protocol**: the entry-store coroutine writes to `/tmp` first, then atomically renames into `/cur` or `/new`, producing IDs of the shape `secs.#counter.M<nanos>P<pid>.<host>`.
+- **Maildir++** mode: optional dotted folder enumeration (`.Work.Foo`) and inbox surfacing, gated by the `maildir_plus` client option.
+- **Dovecot keywords** resolution: read / write the `dovecot-keywords` slot table (`a..z` letters), gated by the `dovecot_keywords` client option.
 - **Header round-trip** for custom keywords: inject and strip `X-Keywords` / `X-Label` headers, gated by `keywords_header` and `strip_headers`.
 
 > [!TIP]
@@ -42,15 +42,15 @@ This library implements the [Maildir](https://en.wikipedia.org/wiki/Maildir) for
 | `MaildirDelete`       | Recursively removes a Maildir                                                                               |
 | `MaildirRename`       | Renames a Maildir within its parent directory                                                               |
 | `MaildirList`         | Lists every valid Maildir inside a root directory                                                           |
-| `MaildirMessageStore` | Writes to `/tmp`, then atomically renames into `/cur` or `/new` with optional flags                         |
-| `MaildirMessageGet`   | Locates a message by ID and reads its contents                                                              |
-| `MaildirMessagesList` | Scans both `/new` and `/cur` and returns every confirmed entry                                              |
-| `MaildirMessageCopy`  | Copies a message between Maildirs                                                                           |
-| `MaildirMessageMove`  | Moves a message between Maildirs                                                                            |
-| `MaildirMessageLocate`| Finds a message file by ID across `cur`, `new` and `tmp`                                                    |
-| `MaildirFlagsAdd`     | Adds flags to a message in `/cur` (no-op for `/new` and `/tmp`)                                             |
-| `MaildirFlagsRemove`  | Removes flags from a message in `/cur` (no-op for `/new` and `/tmp`)                                        |
-| `MaildirFlagsSet`     | Replaces the flags of a message in `/cur` (no-op for `/new` and `/tmp`)                                     |
+| `MaildirEntryStore`   | Writes to `/tmp`, then atomically renames into `/cur` or `/new` with optional flags                         |
+| `MaildirEntryGet`     | Locates an entry by ID and reads its contents                                                               |
+| `MaildirEntryList`    | Scans both `/new` and `/cur` and returns every confirmed entry                                              |
+| `MaildirEntryCopy`    | Copies an entry between Maildirs                                                                            |
+| `MaildirEntryMove`    | Moves an entry between Maildirs                                                                             |
+| `MaildirEntryLocate`  | Finds an entry file by ID across `cur`, `new` and `tmp`                                                     |
+| `MaildirFlagsAdd`     | Adds flags to an entry in `/cur` (no-op for `/new` and `/tmp`)                                              |
+| `MaildirFlagsRemove`  | Removes flags from an entry in `/cur` (no-op for `/new` and `/tmp`)                                         |
+| `MaildirFlagsSet`     | Replaces the flags of an entry in `/cur` (no-op for `/new` and `/tmp`)                                      |
 | `DovecotLoad`         | Reads the per-folder `dovecot-keywords` slot table                                                          |
 | `DovecotStore`        | Writes a per-folder `dovecot-keywords` slot table                                                           |
 
@@ -60,7 +60,7 @@ I/O Maildir can be consumed two ways, depending on how much of the I/O stack you
 
 Whichever mode you pick, every coroutine implements the `MaildirCoroutine` trait. Its `resume(arg: Option<MaildirReply>)` method returns a `MaildirCoroutineState<Yield, Return>` with two variants:
 
-- `Yielded(Y)`: intermediate. `Y` is `MaildirYield`, mixing filesystem step requests (`WantsDirCreate`, `WantsDirRead`, `WantsDirRemove`, `WantsDirExists`, `WantsFileCreate`, `WantsFileRead`, `WantsFileExists`, `WantsRename`, `WantsCopy`) with the three environmental inputs used by the delivery protocol to mint message identifiers (`WantsTime`, `WantsPid`, `WantsHostname`).
+- `Yielded(Y)`: intermediate. `Y` is `MaildirYield`, mixing filesystem step requests (`WantsDirCreate`, `WantsDirRead`, `WantsDirRemove`, `WantsDirExists`, `WantsFileCreate`, `WantsFileRead`, `WantsFileExists`, `WantsRename`, `WantsCopy`) with the three environmental inputs used by the delivery protocol to mint entry identifiers (`WantsTime`, `WantsPid`, `WantsHostname`).
 - `Complete(R)`: terminal. By convention `R = Result<Output, Error>` carrying the operation's final value.
 
 The driver answers each `Yielded(MaildirYield::Wants*)` with the matching `MaildirReply` variant on the next resume.
@@ -74,7 +74,7 @@ Create a fresh Maildir against a blocking caller (the same shape works under asy
 ```rust,ignore
 use std::fs;
 
-use io_maildir::{coroutine::*, coroutines::maildir_create::*, path::MaildirPath};
+use io_maildir::{coroutine::*, maildir::create::*, path::MaildirPath};
 
 let root = MaildirPath::new("/path/to/maildir");
 
@@ -96,7 +96,7 @@ loop {
 }
 ```
 
-Drive a multi-step command (store a message) the same way:
+Drive a multi-step command (store an entry) the same way:
 
 ```rust,ignore
 use std::{
@@ -107,19 +107,19 @@ use std::{
 use gethostname::gethostname;
 use io_maildir::{
     coroutine::*,
-    coroutines::message_store::*,
-    flag::MaildirFlags,
-    maildir::{Maildir, MaildirSubdir},
+    entry::store::*,
+    flag::types::MaildirFlags,
+    maildir::types::{Maildir, MaildirSubdir},
     path::MaildirPath,
 };
 
 let maildir = Maildir::from_path(MaildirPath::new("/path/to/maildir"));
 let contents = b"From: alice@example.com\r\nSubject: Hello\r\n\r\nHello!\r\n".to_vec();
 
-let mut coroutine = MaildirMessageStore::new(maildir, MaildirSubdir::New, MaildirFlags::default(), contents);
+let mut coroutine = MaildirEntryStore::new(maildir, MaildirSubdir::New, MaildirFlags::default(), contents);
 let mut arg: Option<MaildirReply> = None;
 
-let MaildirMessageStoreOutput { id, path } = loop {
+let MaildirEntryStoreOutput { id, path } = loop {
     match coroutine.resume(arg.take()) {
         MaildirCoroutineState::Complete(Ok(out)) => break out,
         MaildirCoroutineState::Complete(Err(err)) => panic!("{err}"),
@@ -145,7 +145,7 @@ let MaildirMessageStoreOutput { id, path } = loop {
             }
             arg = Some(MaildirReply::Rename);
         }
-        MaildirCoroutineState::Yielded(other) => unreachable!("MaildirMessageStore yielded {other:?}"),
+        MaildirCoroutineState::Yielded(other) => unreachable!("MaildirEntryStore yielded {other:?}"),
     }
 };
 
@@ -164,16 +164,19 @@ io-maildir = "0.0.1" # client is enabled by default
 ```rust,ignore
 use io_maildir::{client::MaildirClient, flag::MaildirFlags, maildir::MaildirSubdir};
 
-let client = MaildirClient::new("/path/to/root");
+let mut client = MaildirClient::new("/path/to/root");
+// client.store.maildirpp = true; // opt into Maildir++ if needed
 
-client.create_maildir("/path/to/root/inbox")?;
-let maildir = client.load_maildir("/path/to/root/inbox")?;
+client.create_maildir("inbox")?;
+let maildir = client.load_maildir("inbox")?;
 
 let contents = b"From: alice@example.com\r\nSubject: Hello\r\n\r\nHello!\r\n".to_vec();
 let (id, path) = client.store(maildir, MaildirSubdir::New, MaildirFlags::default(), contents)?;
 
 println!("stored {id} at {path}");
 ```
+
+Logical mailbox names ("inbox", "Archive/2024") are translated to on-disk paths by `client.store` according to its `maildirpp` flag: in fs layout (default) "Archive/2024" becomes `<root>/Archive/2024/`; in Maildir++ it becomes `<root>/.Archive.2024/`.
 
 ## Examples
 

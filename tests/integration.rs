@@ -32,9 +32,9 @@ use std::path::Path;
 
 use io_maildir::{
     client::MaildirClient,
-    flag::{MaildirFlag, MaildirFlags},
-    maildir::MaildirSubdir,
-    path::MaildirPath,
+    flag::types::{MaildirFlag, MaildirFlags},
+    maildir::types::MaildirSubdir,
+    path::FsPath,
 };
 use tempfile::tempdir;
 
@@ -43,7 +43,7 @@ fn end_to_end() {
     let _ = env_logger::try_init();
 
     let dir = tempdir().expect("create tempdir");
-    let root = MaildirPath::new(dir.path().to_string_lossy().into_owned());
+    let root = FsPath::new(dir.path().to_string_lossy().into_owned());
     let client = MaildirClient::new(root.clone());
 
     // ── MAILDIR LIST (baseline) ─────────────────────────────────────
@@ -53,17 +53,11 @@ fn end_to_end() {
 
     // ── MAILDIR CREATE ──────────────────────────────────────────────
 
-    client
-        .create_maildir(root.join("inbox"))
-        .expect("create inbox");
-    client
-        .create_maildir(root.join("drafts"))
-        .expect("create drafts");
+    client.create_maildir("inbox").expect("create inbox");
+    client.create_maildir("drafts").expect("create drafts");
 
-    let inbox = client.load_maildir(root.join("inbox")).expect("load inbox");
-    let drafts = client
-        .load_maildir(root.join("drafts"))
-        .expect("load drafts");
+    let inbox = client.load_maildir("inbox").expect("load inbox");
+    let drafts = client.load_maildir("drafts").expect("load drafts");
 
     for maildir in [&inbox, &drafts] {
         assert!(Path::new(maildir.cur().as_str()).is_dir());
@@ -309,7 +303,7 @@ fn end_to_end() {
     // ── RENAME (drafts → archive) ───────────────────────────────────
 
     client
-        .rename_maildir(drafts.path().clone(), "archive")
+        .rename_maildir("drafts", "archive")
         .expect("rename drafts → archive");
     assert!(
         !Path::new(root.join("drafts").as_str()).exists(),
@@ -321,7 +315,7 @@ fn end_to_end() {
     );
 
     let archive = client
-        .load_maildir(root.join("archive"))
+        .load_maildir("archive")
         .expect("load archive after rename");
 
     // Reload entry_b path inside archive then delete it directly.
@@ -337,9 +331,7 @@ fn end_to_end() {
 
     // ── DELETE MAILDIR ──────────────────────────────────────────────
 
-    client
-        .delete_maildir(archive.path().clone())
-        .expect("delete archive");
+    client.delete_maildir("archive").expect("delete archive");
     assert!(
         !Path::new(archive.path().as_str()).exists(),
         "archive dir should be removed",
