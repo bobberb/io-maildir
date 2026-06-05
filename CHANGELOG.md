@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-06-05
+
 ### Added
 
 - Added the `MaildirCoroutine` trait mirroring `core::ops::Coroutine`.
@@ -81,4 +83,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Drives the coroutine through `MaildirClient::run` so the snippet stays self-contained and `cargo test --doc` compiles it.
 
-[unreleased]: https://github.com/pimalaya/io-maildir/compare/root..HEAD
+[unreleased]: https://github.com/pimalaya/io-maildir/compare/v0.1.0..HEAD
+[0.1.0]: https://github.com/pimalaya/io-maildir/compare/root..v0.1.0

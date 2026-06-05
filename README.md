@@ -164,7 +164,7 @@ Enable the `client` feature (on by default). `MaildirClient::new(root)` wraps a 
 
 ```toml,ignore
 [dependencies]
-io-maildir = "0.0.1" # client is enabled by default
+io-maildir = "0.1.0" # client is enabled by default
 ```
 
 ```rust,no_run
