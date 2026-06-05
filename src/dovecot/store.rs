@@ -1,5 +1,23 @@
 //! I/O-free coroutine writing the `dovecot-keywords` slot table at
 //! the root of a Maildir.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use std::collections::BTreeMap;
+//!
+//! use io_maildir::{client::MaildirClient, dovecot::store::DovecotStore};
+//!
+//! let client = MaildirClient::new("/path/to/root");
+//! let maildir = client.load_maildir("inbox").unwrap();
+//!
+//! let mut table = BTreeMap::new();
+//! table.insert('a', "Important".to_string());
+//! table.insert('b', "Personal".to_string());
+//!
+//! let coroutine = DovecotStore::new(&maildir, &table);
+//! client.run(coroutine).unwrap();
+//! ```
 
 use core::{fmt, mem};
 
@@ -9,7 +27,7 @@ use log::trace;
 use thiserror::Error;
 
 use crate::{
-    coroutine::*, dovecot::types::serialize_dovecot_keywords, maildir::types::Maildir, path::FsPath,
+    coroutine::*, dovecot::utils::serialize_dovecot_keywords, maildir::types::Maildir, path::FsPath,
 };
 
 const FILENAME: &str = "dovecot-keywords";

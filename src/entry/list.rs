@@ -1,4 +1,20 @@
 //! I/O-free coroutine listing entries (no body) in a Maildir.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use io_maildir::{client::MaildirClient, entry::list::MaildirEntryList};
+//!
+//! let client = MaildirClient::new("/path/to/root");
+//! let maildir = client.load_maildir("inbox").unwrap();
+//!
+//! let coroutine = MaildirEntryList::new(maildir);
+//! let entries = client.run(coroutine).unwrap();
+//!
+//! for entry in &entries {
+//!     println!("{}", entry.path());
+//! }
+//! ```
 
 use core::{fmt, mem};
 

@@ -211,12 +211,14 @@ impl AsRef<str> for MaildirPath {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use crate::path::{FsPath, MaildirPath};
 
     #[test]
     fn maildir_path_components_skips_empties() {
         let p = MaildirPath::from("/Foo//Bar/");
-        let parts: alloc::vec::Vec<&str> = p.components().collect();
+        let parts: Vec<&str> = p.components().collect();
         assert_eq!(parts, ["Foo", "Bar"]);
     }
 
@@ -278,7 +280,7 @@ mod tests {
     #[test]
     fn components_skips_empties() {
         let p = FsPath::new("/a//b/");
-        let parts: alloc::vec::Vec<&str> = p.components().collect();
+        let parts: Vec<&str> = p.components().collect();
         assert_eq!(parts, ["a", "b"]);
     }
 }

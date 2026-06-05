@@ -1,5 +1,20 @@
 //! I/O-free coroutine listing every Maildir reachable from a store's
 //! root.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use io_maildir::{client::MaildirClient, maildir::list::MaildirList};
+//!
+//! let client = MaildirClient::new("/path/to/root");
+//!
+//! let coroutine = MaildirList::new(&client.store);
+//! let maildirs = client.run(coroutine).unwrap();
+//!
+//! for maildir in &maildirs {
+//!     println!("{}", maildir.path());
+//! }
+//! ```
 
 use core::{fmt, mem};
 

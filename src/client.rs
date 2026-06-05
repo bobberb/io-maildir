@@ -19,10 +19,11 @@ use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    dovecot::{load::*, store::*},
+    dovecot::{load::*, store::*, utils::allocate_keyword_slot},
     entry::{
         copy::*,
         get::*,
+        headers::{inject_header, strip_headers},
         list::*,
         locate::*,
         r#move::*,
@@ -391,7 +392,7 @@ impl MaildirClient {
             contents
         } else {
             let names: Vec<&str> = self.strip_headers.iter().map(String::as_str).collect();
-            crate::entry::headers::strip_headers(&contents, &names)
+            strip_headers(&contents, &names)
         };
         Ok(MaildirFullEntry::from((path.clone(), contents)))
     }
@@ -466,8 +467,7 @@ impl MaildirClient {
                     _ => ", ",
                 };
                 let value = keywords.join(sep);
-                contents =
-                    crate::entry::headers::inject_header(&contents, header.header_name(), &value);
+                contents = inject_header(&contents, header.header_name(), &value);
             }
         }
 
@@ -475,7 +475,7 @@ impl MaildirClient {
             let mut table = self.load_dovecot_keywords(&maildir)?;
             let original_len = table.len();
             for keyword in &keywords {
-                match crate::dovecot::types::allocate_keyword_slot(&mut table, keyword) {
+                match allocate_keyword_slot(&mut table, keyword) {
                     Some(letter) => {
                         flags.extend_letters([letter]);
                     }
@@ -536,7 +536,7 @@ impl MaildirClient {
         let original_len = table.len();
 
         for keyword in &keywords {
-            match crate::dovecot::types::allocate_keyword_slot(&mut table, keyword) {
+            match allocate_keyword_slot(&mut table, keyword) {
                 Some(letter) => {
                     flags.extend_letters([letter]);
                 }

@@ -25,7 +25,7 @@ This library is composed of 2 feature-gated layers:
 - **I/O-free** coroutines: `no_std` state machines; no filesystem calls, no async runtime, no `std` required, drive against any blocking, async, or fuzz harness.
 - Standard, blocking client (requires `client` feature) backed by `std::fs`.
 - **Maildir delivery protocol**: the entry-store coroutine writes to `/tmp` first, then atomically renames into `/cur` or `/new`, producing IDs of the shape `secs.#counter.M<nanos>P<pid>.<host>`.
-- **Maildir++** mode: optional dotted folder enumeration (`.Work.Foo`) and inbox surfacing, gated by the `maildir_plus` client option.
+- **Maildir++** mode: optional dotted folder enumeration (`.Work.Foo`) and inbox surfacing, gated by the `maildirpp` store flag.
 - **Dovecot keywords** resolution: read / write the `dovecot-keywords` slot table (`a..z` letters), gated by the `dovecot_keywords` client option.
 - **Header round-trip** for custom keywords: inject and strip `X-Keywords` / `X-Label` headers, gated by `keywords_header` and `strip_headers`.
 
@@ -71,14 +71,20 @@ No features required: works in `#![no_std]`, no filesystem calls, no async runti
 
 Create a fresh Maildir against a blocking caller (the same shape works under async or in-memory replay):
 
-```rust,ignore
+```rust,no_run
 use std::fs;
 
-use io_maildir::{coroutine::*, maildir::create::*, path::MaildirPath};
+use io_maildir::{
+    coroutine::*,
+    maildir::create::MaildirCreate,
+    path::{FsPath, MaildirPath},
+    store::MaildirStore,
+};
 
-let root = MaildirPath::new("/path/to/maildir");
+let store = MaildirStore { root: FsPath::new("/path/to/root"), maildirpp: false };
+let name = MaildirPath::from("inbox");
 
-let mut coroutine = MaildirCreate::new(root);
+let mut coroutine = MaildirCreate::new(&store, name);
 let mut arg: Option<MaildirReply> = None;
 
 loop {
@@ -98,7 +104,7 @@ loop {
 
 Drive a multi-step command (store an entry) the same way:
 
-```rust,ignore
+```rust,no_run
 use std::{
     fs, process,
     time::{SystemTime, UNIX_EPOCH},
@@ -107,13 +113,13 @@ use std::{
 use gethostname::gethostname;
 use io_maildir::{
     coroutine::*,
-    entry::store::*,
+    entry::store::{MaildirEntryStore, MaildirEntryStoreOutput},
     flag::types::MaildirFlags,
     maildir::types::{Maildir, MaildirSubdir},
-    path::MaildirPath,
+    path::FsPath,
 };
 
-let maildir = Maildir::from_path(MaildirPath::new("/path/to/maildir"));
+let maildir = Maildir::from_path(FsPath::new("/path/to/root/inbox"));
 let contents = b"From: alice@example.com\r\nSubject: Hello\r\n\r\nHello!\r\n".to_vec();
 
 let mut coroutine = MaildirEntryStore::new(maildir, MaildirSubdir::New, MaildirFlags::default(), contents);
@@ -161,9 +167,14 @@ Enable the `client` feature (on by default). `MaildirClient::new(root)` wraps a 
 io-maildir = "0.0.1" # client is enabled by default
 ```
 
-```rust,ignore
-use io_maildir::{client::MaildirClient, flag::MaildirFlags, maildir::MaildirSubdir};
+```rust,no_run
+use io_maildir::{
+    client::{MaildirClient, MaildirClientError},
+    flag::types::MaildirFlags,
+    maildir::types::MaildirSubdir,
+};
 
+# fn main() -> Result<(), MaildirClientError> {
 let mut client = MaildirClient::new("/path/to/root");
 // client.store.maildirpp = true; // opt into Maildir++ if needed
 
@@ -174,6 +185,8 @@ let contents = b"From: alice@example.com\r\nSubject: Hello\r\n\r\nHello!\r\n".to
 let (id, path) = client.store(maildir, MaildirSubdir::New, MaildirFlags::default(), contents)?;
 
 println!("stored {id} at {path}");
+# Ok(())
+# }
 ```
 
 Logical mailbox names ("inbox", "Archive/2024") are translated to on-disk paths by `client.store` according to its `maildirpp` flag: in fs layout (default) "Archive/2024" becomes `<root>/Archive/2024/`; in Maildir++ it becomes `<root>/.Archive.2024/`.
@@ -206,7 +219,7 @@ AI-generated code; the code is adjusted to fit correct behaviour.
 but nonexistent APIs, stale spec references. The verification workflow catches most of this; it does not catch all of it. Bug reports are welcome and taken
 seriously.
 
-- **Last reviewed**: 29/05/2026
+- **Last reviewed**: 05/06/2026
 
 ## License
 

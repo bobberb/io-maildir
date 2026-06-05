@@ -2,6 +2,7 @@
 
 use core::fmt;
 use core::fmt::Write as _;
+use core::str::FromStr;
 
 use alloc::{
     collections::{BTreeMap, BTreeSet},
@@ -249,7 +250,7 @@ impl KeywordHeader {
     }
 }
 
-impl core::str::FromStr for KeywordHeader {
+impl FromStr for KeywordHeader {
     type Err = &'static str;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {

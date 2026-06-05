@@ -1,4 +1,19 @@
 //! I/O-free coroutine deleting a Maildir and all its contents.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use io_maildir::{
+//!     client::MaildirClient,
+//!     maildir::delete::MaildirDelete,
+//!     path::MaildirPath,
+//! };
+//!
+//! let client = MaildirClient::new("/path/to/root");
+//!
+//! let coroutine = MaildirDelete::new(&client.store, MaildirPath::from("inbox"));
+//! client.run(coroutine).unwrap();
+//! ```
 
 use core::{fmt, mem};
 

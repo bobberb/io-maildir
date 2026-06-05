@@ -1,4 +1,18 @@
 //! I/O-free coroutine fetching a Maildir entry by its ID.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use io_maildir::{client::MaildirClient, entry::get::MaildirEntryGet};
+//!
+//! let client = MaildirClient::new("/path/to/root");
+//! let maildir = client.load_maildir("inbox").unwrap();
+//!
+//! let coroutine = MaildirEntryGet::new(maildir, "1700000000.1.M0P1.host");
+//! let entry = client.run(coroutine).unwrap();
+//!
+//! println!("{} bytes at {}", entry.contents().len(), entry.path());
+//! ```
 
 use core::{fmt, mem};
 

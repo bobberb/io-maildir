@@ -1,7 +1,23 @@
 //! I/O-free coroutine reading the `dovecot-keywords` slot table at the
 //! root of a Maildir. Returns an empty table when the file is absent.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use io_maildir::{client::MaildirClient, dovecot::load::DovecotLoad};
+//!
+//! let client = MaildirClient::new("/path/to/root");
+//! let maildir = client.load_maildir("inbox").unwrap();
+//!
+//! let coroutine = DovecotLoad::new(&maildir);
+//! let table = client.run(coroutine).unwrap();
+//!
+//! for (letter, keyword) in &table {
+//!     println!("{letter} = {keyword}");
+//! }
+//! ```
 
-use core::fmt;
+use core::{fmt, str};
 
 use alloc::{
     collections::{BTreeMap, BTreeSet},
@@ -12,7 +28,7 @@ use log::trace;
 use thiserror::Error;
 
 use crate::{
-    coroutine::*, dovecot::types::parse_dovecot_keywords, maildir::types::Maildir, path::FsPath,
+    coroutine::*, dovecot::utils::parse_dovecot_keywords, maildir::types::Maildir, path::FsPath,
 };
 
 const FILENAME: &str = "dovecot-keywords";
@@ -67,7 +83,7 @@ impl MaildirCoroutine for DovecotLoad {
             }
             (State::AwaitRead, Some(MaildirReply::FileRead(mut map))) => {
                 let bytes = map.remove(&self.path).unwrap_or_default();
-                let text = core::str::from_utf8(&bytes).unwrap_or("");
+                let text = str::from_utf8(&bytes).unwrap_or("");
                 let table = parse_dovecot_keywords(text);
                 MaildirCoroutineState::Complete(Ok(table))
             }

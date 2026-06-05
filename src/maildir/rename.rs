@@ -1,4 +1,23 @@
 //! I/O-free coroutine renaming a Maildir directory.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use io_maildir::{
+//!     client::MaildirClient,
+//!     maildir::rename::MaildirRename,
+//!     path::MaildirPath,
+//! };
+//!
+//! let client = MaildirClient::new("/path/to/root");
+//!
+//! let coroutine = MaildirRename::new(
+//!     &client.store,
+//!     MaildirPath::from("inbox"),
+//!     MaildirPath::from("archive"),
+//! );
+//! client.run(coroutine).unwrap();
+//! ```
 
 use core::{fmt, mem};
 

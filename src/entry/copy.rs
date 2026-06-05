@@ -1,4 +1,17 @@
 //! I/O-free coroutine copying a Maildir entry to another Maildir.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use io_maildir::{client::MaildirClient, entry::copy::MaildirEntryCopy};
+//!
+//! let client = MaildirClient::new("/path/to/root");
+//! let source = client.load_maildir("inbox").unwrap();
+//! let target = client.load_maildir("archive").unwrap();
+//!
+//! let coroutine = MaildirEntryCopy::new("1700000000.1.M0P1.host", source, target, None);
+//! client.run(coroutine).unwrap();
+//! ```
 
 use core::fmt;
 

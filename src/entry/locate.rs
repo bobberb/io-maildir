@@ -1,4 +1,21 @@
 //! I/O-free coroutine locating a Maildir entry by its ID.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use io_maildir::{
+//!     client::MaildirClient,
+//!     entry::locate::{MaildirEntryLocate, MaildirEntryLocateOutput},
+//! };
+//!
+//! let client = MaildirClient::new("/path/to/root");
+//! let maildir = client.load_maildir("inbox").unwrap();
+//!
+//! let coroutine = MaildirEntryLocate::new(maildir, "1700000000.1.M0P1.host");
+//! let MaildirEntryLocateOutput { path, subdir, flags } = client.run(coroutine).unwrap();
+//!
+//! println!("found {path} in /{subdir} with flags `{flags}`");
+//! ```
 
 use core::{fmt, mem};
 

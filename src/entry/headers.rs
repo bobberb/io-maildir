@@ -1,8 +1,9 @@
 //! RFC 5322 header helpers: extract keyword headers, strip arbitrary
 //! headers, inject a header after `Date:`.
 
+use core::{iter, str};
+
 use alloc::{
-    str,
     string::{String, ToString},
     vec::Vec,
 };
@@ -181,7 +182,7 @@ fn header_name(line: &[u8]) -> Option<&str> {
     if name.is_empty() {
         return None;
     }
-    core::str::from_utf8(name).ok().map(|s| s.trim())
+    str::from_utf8(name).ok().map(|s| s.trim())
 }
 
 fn header_matches(line: &[u8], name: &str) -> bool {
@@ -194,7 +195,7 @@ fn header_matches(line: &[u8], name: &str) -> bool {
 fn iter_header_lines(bytes: &[u8]) -> impl Iterator<Item = Vec<u8>> + '_ {
     let header_end = find_header_end(bytes);
     let mut cursor = 0;
-    core::iter::from_fn(move || {
+    iter::from_fn(move || {
         if cursor >= header_end {
             return None;
         }

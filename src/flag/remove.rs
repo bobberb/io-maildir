@@ -1,4 +1,20 @@
 //! I/O-free coroutine removing flags from a Maildir entry.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use io_maildir::{
+//!     client::MaildirClient,
+//!     flag::{remove::MaildirFlagsRemove, types::{MaildirFlag, MaildirFlags}},
+//! };
+//!
+//! let client = MaildirClient::new("/path/to/root");
+//! let maildir = client.load_maildir("inbox").unwrap();
+//!
+//! let flags = MaildirFlags::from_iter([MaildirFlag::Seen]);
+//! let coroutine = MaildirFlagsRemove::new(maildir, "1700000000.1.M0P1.host", flags);
+//! client.run(coroutine).unwrap();
+//! ```
 
 use core::fmt;
 

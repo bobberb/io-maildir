@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added I/O-free Dovecot keywords coroutines: `DovecotLoad`, `DovecotStore`.
 
-  Read / write the `dovecot-keywords` slot table mapping `a..z` letters to user-defined keyword strings, gated by the per-client `dovecot_keywords` switch.
+  Read / write the `dovecot-keywords` slot table mapping `a..z` letters to user-defined keyword strings, gated by the per-client `dovecot_keywords` switch. Pure parsers/serialisers live under `dovecot::utils` (`parse_dovecot_keywords`, `serialize_dovecot_keywords`, `allocate_keyword_slot`) for direct reuse.
 
 - Added the `FsPath` / `MaildirPath` split with `MaildirStore` as the translator.
 
@@ -48,5 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added the `serde` cargo feature (default).
 
   Forwards `serde` support to `mail-parser` so parsed entries can be serialized.
+
+- Added a `# Example` `rust,no_run` block at the top of every coroutine module, driving the coroutine through `MaildirClient::run` so the snippet stays self-contained and `cargo test --doc` compiles it.
 
 [unreleased]: https://github.com/pimalaya/io-maildir/compare/root..HEAD

@@ -2,6 +2,8 @@
 //! file dropped at the root of a Maildir by Dovecot / mbsync, mapping
 //! single lowercase letters `a..z` to keyword names.
 
+use core::fmt::Write as _;
+
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
@@ -56,7 +58,7 @@ pub fn serialize_dovecot_keywords(table: &BTreeMap<char, String>) -> String {
             continue;
         };
 
-        let _ = core::fmt::Write::write_fmt(&mut out, format_args!("{n} {name}\n"));
+        let _ = writeln!(out, "{n} {name}");
     }
 
     out

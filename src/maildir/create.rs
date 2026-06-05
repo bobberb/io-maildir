@@ -1,4 +1,19 @@
 //! I/O-free coroutine creating a Maildir with its cur/new/tmp subdirs.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use io_maildir::{
+//!     client::MaildirClient,
+//!     maildir::create::MaildirCreate,
+//!     path::MaildirPath,
+//! };
+//!
+//! let client = MaildirClient::new("/path/to/root");
+//!
+//! let coroutine = MaildirCreate::new(&client.store, MaildirPath::from("inbox"));
+//! client.run(coroutine).unwrap();
+//! ```
 
 use core::{fmt, mem};
 

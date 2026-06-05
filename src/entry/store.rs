@@ -1,5 +1,25 @@
 //! I/O-free coroutine storing an entry in a Maildir per the
 //! delivery protocol (write to `/tmp`, atomic rename into target).
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use io_maildir::{
+//!     client::MaildirClient,
+//!     entry::store::{MaildirEntryStore, MaildirEntryStoreOutput},
+//!     flag::types::MaildirFlags,
+//!     maildir::types::MaildirSubdir,
+//! };
+//!
+//! let client = MaildirClient::new("/path/to/root");
+//! let maildir = client.load_maildir("inbox").unwrap();
+//! let contents = b"From: alice@example.com\r\nSubject: Hello\r\n\r\nHello!\r\n".to_vec();
+//!
+//! let coroutine = MaildirEntryStore::new(maildir, MaildirSubdir::New, MaildirFlags::default(), contents);
+//! let MaildirEntryStoreOutput { id, path } = client.run(coroutine).unwrap();
+//!
+//! println!("stored {id} at {path}");
+//! ```
 
 use core::{
     fmt, mem,
