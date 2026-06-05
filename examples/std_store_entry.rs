@@ -12,7 +12,7 @@ use io_maildir::{
 use tempfile::tempdir;
 
 fn main() {
-    let _ = env_logger::try_init();
+    env_logger::init();
 
     let tmp = tempdir().unwrap();
     let root = FsPath::new(tmp.path().to_string_lossy().into_owned());

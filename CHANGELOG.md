@@ -9,36 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added basic I/O-free coroutines.
+- Added the `MaildirCoroutine` trait mirroring `core::ops::Coroutine`.
 
-- Added standard, blocking client.
+  Composed of `Yield` and `Return` associated types, plus a two-variant `MaildirCoroutineState<Y, R>` (`Yielded(Y)` and `Complete(R)`). Every io-maildir coroutine picks the shared `MaildirYield` enum, mixing filesystem `Wants*` requests (file/dir read, create, remove, rename, copy, exists) with the three environmental inputs the Maildir delivery protocol needs to mint message identifiers (`WantsTime`, `WantsPid`, `WantsHostname`). Replies are fed back via the matching `MaildirReply` enum.
 
-### Changed
+- Added the `maildir_try!` macro: coroutine equivalent of `?`.
 
-- Unified every coroutine under a single `MaildirCoroutine` trait (in `crate::coroutine`) with associated `Arg` / `Output` / `Error`. `resume` now returns `MaildirCoroutineState<Output, Error>` directly; the per-coroutine `Maildir*Result` / `Dovecot*Result` enums are gone, replaced by small `Maildir*Ok` output structs where the previous `Ok { ... }` variant carried more than one field. `MaildirClient::run<C: MaildirCoroutine>` drives any coroutine to completion against the local filesystem.
+  Advances one inner resume step, re-yields intermediate `Yielded(y)` (via `Into`), and short-circuits on `Complete(Err(_))`.
 
-- Migrated every coroutine to the generator-shape trait pattern: `MaildirCoroutine` now exposes associated `Yield` / `Return` types and `MaildirCoroutineState<Y, R>` shrinks to two variants (`Yielded(Y)` / `Complete(R)`). Filesystem and environment requests live on a single shared `MaildirYield` enum and are answered with a single shared `MaildirReply` enum; per-coroutine `Maildir*Arg` enums are gone. `MaildirMessageLocateOk` and `MaildirMessageStoreOk` are renamed to `MaildirMessageLocateOutput` and `MaildirMessageStoreOutput` for consistency. `MaildirClient::run` is now generic over any standard-yield coroutine and every client method collapses to a one-line call.
+- Added I/O-free Maildir layout coroutines: `MaildirCreate`, `MaildirDelete`, `MaildirRename`, `MaildirList`.
 
-- Aligned every coroutine on the canonical io-imap / io-smtp / io-http reference model: private `State` enums with `fmt::Display`, top-of-loop `trace!("<op>: {}", self.state)` instrumentation, the new `maildir_try!` macro for nested coroutines, uniform `"Maildir <op> failed: <reason>"` error message format, and a simplified canonical test layout (success + invalid-reply) per coroutine file.
+  `MaildirCreate` creates `root`, `cur`, `new`, `tmp` in lexicographic order. `MaildirDelete` recursively removes a Maildir. `MaildirRename` renames within the parent directory. `MaildirList` walks every valid Maildir under a root: default fs layout descends recursively through nested subfolders; `MaildirList::new(root).maildirpp(true)` switches to the Maildir++ flat-dotted-siblings layout. Plain Maildir is the zero-subfolders degenerate case of fs.
 
-- Renamed the protocol-agnostic items away from mail-specialised vocabulary to align io-maildir with io-m2dir:
-  - Module `message` renamed to `entry`.
-  - Type `MaildirMessage` renamed to `MaildirFullEntry`.
-  - Coroutines `MaildirMessageCopy`, `MaildirMessageGet`, `MaildirMessageLocate`, `MaildirMessagesList`, `MaildirMessageMove`, `MaildirMessageStore` (and their `*Error`/`*Output` siblings) renamed to `MaildirEntryCopy`, `MaildirEntryGet`, `MaildirEntryLocate`, `MaildirEntryList`, `MaildirEntryMove`, `MaildirEntryStore`.
+- Added I/O-free entry coroutines: `MaildirEntryStore`, `MaildirEntryGet`, `MaildirEntryList`, `MaildirEntryCopy`, `MaildirEntryMove`, `MaildirEntryLocate`.
 
-- Collapsed the `MaildirClient` layout fields into a single `maildirpp: bool`. Dropped the unused `maildirpp_inbox: String` (presentation concern, not a client one) and `fs_layout: bool` (now the default behaviour when `maildirpp = false`). Renamed `maildir_plus` to `maildirpp`.
+  `MaildirEntryStore` follows the Maildir delivery protocol: writes to `/tmp` first, then atomically renames into `/cur` or `/new`, producing IDs of the shape `secs.#counter.M<nanos>P<pid>.<host>`. `MaildirEntryList` scans both `/new` and `/cur` and returns every confirmed entry. `MaildirEntryLocate` finds an entry file by ID across `cur`, `new` and `tmp`.
 
-- Reworked `MaildirList` for the simplified layout model: default (`maildirpp = false`) is fs layout with full recursive descent through nested subfolders; `MaildirList::new(root).maildirpp(true)` switches to the Maildir++ flat-dotted-siblings layout. Replaced the `include_dotted` / `include_root` builder methods with the single `maildirpp` switch. Plain Maildir works as the zero-subfolders degenerate case of fs.
+- Added I/O-free flag coroutines: `MaildirFlagsAdd`, `MaildirFlagsRemove`, `MaildirFlagsSet`.
 
-- Split the single `MaildirPath` type into two distinct flavours and introduced a `MaildirStore` to translate between them:
-  - `FsPath` (formerly `MaildirPath`) is the literal `/`-separated filesystem path.
-  - `MaildirPath` is now the logical mailbox hierarchy ("Inbox/2024/Q1"). The empty path designates the store root.
-  - New `crate::store::MaildirStore { pub root: FsPath, pub maildirpp: bool }` carries the layout and resolves logical names to fs paths: `Foo/Bar` → `<root>/Foo/Bar` in fs, `<root>/.Foo.Bar` in Maildir++.
-  - Layout-aware coroutines `MaildirCreate`, `MaildirDelete`, `MaildirRename`, `MaildirList` now take `&MaildirStore` plus (where applicable) `MaildirPath`. The resolution happens once at construction time; the coroutines themselves stay layout-agnostic at runtime.
-  - `MaildirClient` now exposes `pub store: MaildirStore` (replacing the per-client `maildirpp` field); its `create_maildir`, `delete_maildir`, `rename_maildir`, `load_maildir` methods take logical names instead of fs paths.
-  - `MaildirListOptions` removed: its sole field moved to `MaildirStore`.
-  - Entry- and flag-level coroutines (`entry/*`, `flag/*`) are unchanged: they operate on resolved `Maildir` handles, below the layout abstraction.
+  Each rewrites the `:2,<flags>` suffix on the entry filename in place. Custom keywords are surfaced via the optional `X-Keywords` / `X-Label` header round-trip, gated by per-client `keywords_header` / `strip_headers` switches.
 
-- Merged `LoadMaildirError` into `MaildirClientError` (its `NotDir` and `MissingSubdir` are now top-level variants). The `load_maildir` free function was inlined into `MaildirClient::load_maildir`, and every filesystem helper (`create_dirs`, `remove_dirs`, `write_files`, `read_dirs`, `read_files`, `rename_paths`, `copy_paths`, `file_exists`, `dir_exists`, `normalize_path`) was inlined directly into `MaildirClient::run`. The windows `\\` → `/` normalisation moved from the deleted `normalize_path` helper into the `impl From<PathBuf>` / `From<&Path>` for `MaildirPath` in `src/path.rs`.
+- Added I/O-free Dovecot keywords coroutines: `DovecotLoad`, `DovecotStore`.
+
+  Read / write the `dovecot-keywords` slot table mapping `a..z` letters to user-defined keyword strings, gated by the per-client `dovecot_keywords` switch.
+
+- Added the `FsPath` / `MaildirPath` split with `MaildirStore` as the translator.
+
+  `FsPath` is the literal `/`-separated filesystem path (always uses `/` regardless of host OS). `MaildirPath` is the logical mailbox hierarchy (`"Inbox/2024/Q1"`); the empty path designates the store root. `MaildirStore { root: FsPath, maildirpp: bool }` resolves logical names to fs paths: `Foo/Bar` becomes `<root>/Foo/Bar` in fs layout, `<root>/.Foo.Bar` in Maildir++. Layout-aware coroutines (`MaildirCreate`, `MaildirDelete`, `MaildirRename`, `MaildirList`) take `&MaildirStore` plus (where applicable) `MaildirPath`; entry- and flag-level coroutines operate on resolved `Maildir` handles below the layout abstraction.
+
+- Added the `client` cargo feature (default) enabling `MaildirClient`.
+
+  Standard, blocking client backed by `std::fs` that drives any standard-Yield coroutine to completion. Exposes one method per coroutine plus high-level helpers (`create_maildir`, `delete_maildir`, `rename_maildir`, `load_maildir`) that take logical mailbox names instead of fs paths. Per-protocol behaviour is configured via `pub` fields: `store: MaildirStore` (layout), `dovecot_keywords: bool`, `keywords_header: bool`, `strip_headers: bool`.
+
+- Added the `parser` cargo feature (default).
+
+  Pulls in `mail-parser` to expose `MaildirFullEntry`, an entry paired with its parsed headers.
+
+- Added the `serde` cargo feature (default).
+
+  Forwards `serde` support to `mail-parser` so parsed entries can be serialized.
 
 [unreleased]: https://github.com/pimalaya/io-maildir/compare/root..HEAD

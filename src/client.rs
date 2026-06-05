@@ -109,9 +109,8 @@ pub struct MaildirClient {
 }
 
 impl MaildirClient {
-    /// Builds a client rooted at `root` in fs layout without
-    /// filesystem checks. Flip `client.store.maildirpp = true` for
-    /// Maildir++.
+    /// Builds a client rooted at `root` in fs layout without filesystem
+    /// checks. Flip `client.store.maildirpp = true` for Maildir++.
     pub fn new(root: impl Into<FsPath>) -> Self {
         Self {
             store: MaildirStore {
