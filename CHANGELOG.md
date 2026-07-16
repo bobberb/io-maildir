@@ -7,11 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-16
+
 ### Changed
 
 - Renamed `FsPath` to `MaildirFsPath` and the dovecot coroutines `DovecotLoad` / `DovecotStore` (with their error companions) to `MaildirDovecotLoad` / `MaildirDovecotStore`, so every public item carries the crate domain prefix.
 
 - Flattened the per-module `types` submodules into their parents: `entry::types::*`, `flag::types::*` and `maildir::types::*` are now reached as `entry::*`, `flag::*` and `maildir::*`.
+
+- Reworked library logging to the Pimalaya canon: dropped the per-resume state traces and their message prefixes, logging instead at coroutine completion.
 
 - Realigned the README, the lib.rs header, CONTRIBUTING.md, Cargo.toml and added a docs/ folder to follow the Pimalaya documentation and naming guidelines, and documented every remaining public item.
 
@@ -91,5 +95,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Drives the coroutine through `MaildirClient::run` so the snippet stays self-contained and `cargo test --doc` compiles it.
 
-[unreleased]: https://github.com/pimalaya/io-maildir/compare/v0.1.0..HEAD
+[unreleased]: https://github.com/pimalaya/io-maildir/compare/v0.2.0..HEAD
+[0.2.0]: https://github.com/pimalaya/io-maildir/compare/v0.1.0..v0.2.0
 [0.1.0]: https://github.com/pimalaya/io-maildir/compare/root..v0.1.0
