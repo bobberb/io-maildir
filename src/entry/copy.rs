@@ -1,5 +1,16 @@
 //! I/O-free coroutine copying a Maildir entry to another Maildir.
 //!
+//! Copying is a fresh delivery into `target`: a brand-new Maildir
+//! unique name is minted (time / pid / hostname, like
+//! [`MaildirEntryStore`]) instead of reusing the source basename.
+//! Reusing the source name would carry folder-specific metadata baked
+//! into it by other tools, e.g. mbsync's `,U=<uid>` infix valid only in
+//! the source folder, into the destination, corrupting its sync state
+//! and risking a silent overwrite of a same-named entry. The source
+//! flags are preserved.
+//!
+//! [`MaildirEntryStore`]: crate::entry::store::MaildirEntryStore
+//!
 //! # Example
 //!
 //! ```rust,no_run
@@ -13,17 +24,17 @@
 //! client.run(coroutine).unwrap();
 //! ```
 
-use core::fmt;
+use core::{fmt, mem};
 
-use alloc::string::{String, ToString};
+use alloc::string::ToString;
 
 use log::debug;
 use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    entry::INFORMATIONAL_SUFFIX_SEPARATOR,
-    entry::locate::*,
+    entry::{INFORMATIONAL_SUFFIX_SEPARATOR, locate::*, mint_id},
+    flag::MaildirFlags,
     maildir::{Maildir, MaildirSubdir},
     maildir_try,
     path::MaildirFsPath,
@@ -44,7 +55,6 @@ pub enum MaildirEntryCopyError {
 /// the source subdir.
 #[derive(Debug)]
 pub struct MaildirEntryCopy {
-    id: String,
     target: Maildir,
     target_subdir: Option<MaildirSubdir>,
     state: State,
@@ -59,10 +69,8 @@ impl MaildirEntryCopy {
         target: Maildir,
         target_subdir: Option<MaildirSubdir>,
     ) -> Self {
-        let id = id.to_string();
         Self {
-            state: State::Locate(MaildirEntryLocate::new(source, &id)),
-            id,
+            state: State::Locate(MaildirEntryLocate::new(source, id)),
             target,
             target_subdir,
         }
@@ -80,10 +88,65 @@ impl MaildirCoroutine for MaildirEntryCopy {
         match (&mut self.state, arg) {
             (State::Locate(c), arg) => {
                 let out = maildir_try!(c, arg);
-
-                let target_subdir = self.target_subdir.clone().unwrap_or(out.subdir);
-                let target = build_target_path(&self.target, &target_subdir, &self.id);
-                let pairs = vec![(out.path, target)];
+                let subdir = self.target_subdir.clone().unwrap_or(out.subdir);
+                self.state = State::AwaitTime {
+                    source: out.path,
+                    subdir,
+                    flags: out.flags,
+                };
+                MaildirCoroutineState::Yielded(MaildirYield::WantsTime)
+            }
+            (
+                State::AwaitTime {
+                    source,
+                    subdir,
+                    flags,
+                },
+                Some(MaildirReply::Time { secs, nanos }),
+            ) => {
+                self.state = State::AwaitPid {
+                    source: mem::take(source),
+                    subdir: subdir.clone(),
+                    flags: mem::take(flags),
+                    secs,
+                    nanos,
+                };
+                MaildirCoroutineState::Yielded(MaildirYield::WantsPid)
+            }
+            (
+                State::AwaitPid {
+                    source,
+                    subdir,
+                    flags,
+                    secs,
+                    nanos,
+                },
+                Some(MaildirReply::Pid(pid)),
+            ) => {
+                self.state = State::AwaitHostname {
+                    source: mem::take(source),
+                    subdir: subdir.clone(),
+                    flags: mem::take(flags),
+                    secs: *secs,
+                    nanos: *nanos,
+                    pid,
+                };
+                MaildirCoroutineState::Yielded(MaildirYield::WantsHostname)
+            }
+            (
+                State::AwaitHostname {
+                    source,
+                    subdir,
+                    flags,
+                    secs,
+                    nanos,
+                    pid,
+                },
+                Some(MaildirReply::Hostname(hostname)),
+            ) => {
+                let id = mint_id(*secs, *nanos, *pid, &hostname);
+                let target = build_target_path(&self.target, subdir, &id, flags);
+                let pairs = vec![(mem::take(source), target)];
                 self.state = State::AwaitCopy;
                 MaildirCoroutineState::Yielded(MaildirYield::WantsCopy(pairs))
             }
@@ -102,6 +165,26 @@ impl MaildirCoroutine for MaildirEntryCopy {
 #[derive(Debug)]
 enum State {
     Locate(MaildirEntryLocate),
+    AwaitTime {
+        source: MaildirFsPath,
+        subdir: MaildirSubdir,
+        flags: MaildirFlags,
+    },
+    AwaitPid {
+        source: MaildirFsPath,
+        subdir: MaildirSubdir,
+        flags: MaildirFlags,
+        secs: u64,
+        nanos: u32,
+    },
+    AwaitHostname {
+        source: MaildirFsPath,
+        subdir: MaildirSubdir,
+        flags: MaildirFlags,
+        secs: u64,
+        nanos: u32,
+        pid: u32,
+    },
     AwaitCopy,
 }
 
@@ -109,15 +192,23 @@ impl fmt::Display for State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Locate(_) => f.write_str("locate source"),
+            Self::AwaitTime { .. } => f.write_str("await time reply"),
+            Self::AwaitPid { .. } => f.write_str("await pid reply"),
+            Self::AwaitHostname { .. } => f.write_str("await hostname reply"),
             Self::AwaitCopy => f.write_str("await copy reply"),
         }
     }
 }
 
-fn build_target_path(target: &Maildir, subdir: &MaildirSubdir, id: &str) -> MaildirFsPath {
+fn build_target_path(
+    target: &Maildir,
+    subdir: &MaildirSubdir,
+    id: &str,
+    flags: &MaildirFlags,
+) -> MaildirFsPath {
     match subdir {
         MaildirSubdir::Cur => {
-            let name = format!("{id}{INFORMATIONAL_SUFFIX_SEPARATOR}2,");
+            let name = format!("{id}{INFORMATIONAL_SUFFIX_SEPARATOR}2,{flags}");
             target.cur().join(&name)
         }
         MaildirSubdir::New => target.new().join(id),
@@ -127,6 +218,11 @@ fn build_target_path(target: &Maildir, subdir: &MaildirSubdir, id: &str) -> Mail
 
 #[cfg(test)]
 mod tests {
+    use alloc::{
+        collections::{BTreeMap, BTreeSet},
+        string::String,
+    };
+
     use crate::entry::copy::*;
 
     fn source() -> Maildir {
@@ -144,6 +240,67 @@ mod tests {
 
         let err = expect_complete_err(&mut cor, Some(MaildirReply::DirCreate));
         assert!(matches!(err, MaildirEntryCopyError::Locate(_)));
+    }
+
+    #[test]
+    fn cur_copy_mints_fresh_id_and_preserves_flags() {
+        // Source carries mbsync's `,U=999` infix and `FS` flags.
+        let mut cor = MaildirEntryCopy::new("1700000000.abc.host,U=999", source(), target(), None);
+
+        // Locate: probe new/tmp, miss, scan cur, find the entry.
+        expect_wants_file_exists(&mut cor);
+        let mut probe = BTreeMap::new();
+        probe.insert(
+            MaildirFsPath::from("root/src/new/1700000000.abc.host,U=999"),
+            false,
+        );
+        probe.insert(
+            MaildirFsPath::from("root/src/tmp/1700000000.abc.host,U=999"),
+            false,
+        );
+        match cor.resume(Some(MaildirReply::FileExists(probe))) {
+            MaildirCoroutineState::Yielded(MaildirYield::WantsDirRead(_)) => {}
+            state => panic!("expected WantsDirRead, got {state:?}"),
+        }
+        let mut entries = BTreeMap::new();
+        let mut set = BTreeSet::new();
+        set.insert(MaildirFsPath::from(
+            "root/src/cur/1700000000.abc.host,U=999:2,FS",
+        ));
+        entries.insert(MaildirFsPath::from("root/src/cur"), set);
+        // Locate completes; the first delivery step asks for time.
+        match cor.resume(Some(MaildirReply::DirRead(entries))) {
+            MaildirCoroutineState::Yielded(MaildirYield::WantsTime) => {}
+            state => panic!("expected WantsTime, got {state:?}"),
+        }
+        match cor.resume(Some(MaildirReply::Time { secs: 1, nanos: 2 })) {
+            MaildirCoroutineState::Yielded(MaildirYield::WantsPid) => {}
+            state => panic!("expected WantsPid, got {state:?}"),
+        }
+        match cor.resume(Some(MaildirReply::Pid(3))) {
+            MaildirCoroutineState::Yielded(MaildirYield::WantsHostname) => {}
+            state => panic!("expected WantsHostname, got {state:?}"),
+        }
+        match cor.resume(Some(MaildirReply::Hostname(String::from("host")))) {
+            MaildirCoroutineState::Yielded(MaildirYield::WantsCopy(pairs)) => {
+                let (from, to) = &pairs[0];
+                assert_eq!(
+                    from,
+                    &MaildirFsPath::from("root/src/cur/1700000000.abc.host,U=999:2,FS")
+                );
+                let to = to.as_str();
+                // Fresh id under target/cur, no `,U=999`, flags preserved.
+                assert!(to.starts_with("root/dst/cur/1."), "got {to}");
+                assert!(!to.contains(",U=999"), "carried foreign UID: {to}");
+                // Flags preserved; rendered in canonical (sorted) order.
+                assert!(to.ends_with(":2,SF"), "flags not preserved: {to}");
+            }
+            state => panic!("expected WantsCopy, got {state:?}"),
+        }
+        match cor.resume(Some(MaildirReply::Copy)) {
+            MaildirCoroutineState::Complete(Ok(())) => {}
+            state => panic!("expected Complete(Ok), got {state:?}"),
+        }
     }
 
     fn expect_wants_file_exists(cor: &mut MaildirEntryCopy) {

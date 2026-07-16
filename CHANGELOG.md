@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Realigned the README, the lib.rs header, CONTRIBUTING.md, Cargo.toml and added a docs/ folder to follow the Pimalaya documentation and naming guidelines, and documented every remaining public item.
 
+### Fixed
+
+- `MaildirEntryCopy` and `MaildirEntryMove` now mint a fresh unique name and preserve flags ([#1]).
+
+  Both previously built the destination filename from the raw source basename (`{id}:2,`), which reused the source unique name verbatim (carrying folder-specific metadata baked in by other tools, notably mbsync's `,U=<uid>` infix valid only in the source folder, into the destination where it corrupts sync state and can silently overwrite a same-named entry) and dropped the source flags. Copy and move now follow the same delivery convention as `MaildirEntryStore` (a shared `mint_id` from time / pid / hostname) and carry the source flags into the target `:2,<flags>` suffix.
+
 ## [0.1.0] - 2026-06-05
 
 ### Added
@@ -94,6 +100,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a `# Example` `rust,no_run` block at the top of every coroutine module.
 
   Drives the coroutine through `MaildirClient::run` so the snippet stays self-contained and `cargo test --doc` compiles it.
+
+[#1]: https://github.com/pimalaya/io-maildir/issues/1
 
 [unreleased]: https://github.com/pimalaya/io-maildir/compare/v0.2.0..HEAD
 [0.2.0]: https://github.com/pimalaya/io-maildir/compare/v0.1.0..v0.2.0
