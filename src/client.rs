@@ -21,6 +21,7 @@ use crate::{
     coroutine::*,
     dovecot::{load::*, store::*, utils::allocate_keyword_slot},
     entry::{
+        MaildirEntry, MaildirFullEntry,
         copy::*,
         get::*,
         headers::{inject_header, strip_headers},
@@ -28,67 +29,68 @@ use crate::{
         locate::*,
         r#move::*,
         store::*,
-        types::{MaildirEntry, MaildirFullEntry},
     },
-    flag::{
-        add::*,
-        remove::*,
-        set::*,
-        types::{KeywordHeader, MaildirFlags},
-    },
-    maildir::{
-        create::*,
-        delete::*,
-        list::*,
-        rename::*,
-        types::{CUR, Maildir, MaildirSubdir, NEW, TMP},
-    },
-    path::{FsPath, MaildirPath},
+    flag::{KeywordHeader, MaildirFlags, add::*, remove::*, set::*},
+    maildir::{CUR, Maildir, MaildirSubdir, NEW, TMP, create::*, delete::*, list::*, rename::*},
+    path::{MaildirFsPath, MaildirPath},
     store::MaildirStore,
 };
 
 /// Errors returned by the [`MaildirClient`] helpers.
 #[derive(Debug, Error)]
 pub enum MaildirClientError {
+    /// The resolved path exists but is not a directory.
     #[error("path {0} is not a directory")]
-    NotDir(FsPath),
+    NotDir(MaildirFsPath),
+    /// One of the cur/new/tmp subdirectories is missing.
     #[error("missing {0}/ subdirectory at Maildir {1}")]
-    MissingSubdir(&'static str, FsPath),
-
+    MissingSubdir(&'static str, MaildirFsPath),
+    /// The dovecot-keywords load coroutine failed.
     #[error(transparent)]
-    DovecotLoad(#[from] DovecotLoadError),
+    MaildirDovecotLoad(#[from] MaildirDovecotLoadError),
+    /// The dovecot-keywords store coroutine failed.
     #[error(transparent)]
-    DovecotStore(#[from] DovecotStoreError),
-
+    MaildirDovecotStore(#[from] MaildirDovecotStoreError),
+    /// The flags-add coroutine failed.
     #[error(transparent)]
     FlagsAdd(#[from] MaildirFlagsAddError),
+    /// The flags-remove coroutine failed.
     #[error(transparent)]
     FlagsRemove(#[from] MaildirFlagsRemoveError),
+    /// The flags-set coroutine failed.
     #[error(transparent)]
     FlagsSet(#[from] MaildirFlagsSetError),
-
+    /// The Maildir-create coroutine failed.
     #[error(transparent)]
     MaildirCreate(#[from] MaildirCreateError),
+    /// The Maildir-delete coroutine failed.
     #[error(transparent)]
     MaildirDelete(#[from] MaildirDeleteError),
+    /// The Maildir-list coroutine failed.
     #[error(transparent)]
     MaildirList(#[from] MaildirListError),
+    /// The Maildir-rename coroutine failed.
     #[error(transparent)]
     MaildirRename(#[from] MaildirRenameError),
-
+    /// The entry-copy coroutine failed.
     #[error(transparent)]
     EntryCopy(#[from] MaildirEntryCopyError),
+    /// The entry-get coroutine failed.
     #[error(transparent)]
     EntryGet(#[from] MaildirEntryGetError),
+    /// The entry-locate coroutine failed.
     #[error(transparent)]
     EntryLocate(#[from] MaildirEntryLocateError),
+    /// The entry-list coroutine failed.
     #[error(transparent)]
     EntryList(#[from] MaildirEntryListError),
+    /// The entry-move coroutine failed.
     #[error(transparent)]
     EntryMove(#[from] MaildirEntryMoveError),
+    /// The entry-store coroutine failed.
     #[error(transparent)]
     EntryStore(#[from] MaildirEntryStoreError),
-
+    /// A filesystem operation failed.
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -100,7 +102,6 @@ pub enum MaildirClientError {
 pub struct MaildirClient {
     /// Filesystem root + layout (fs / Maildir++).
     pub store: MaildirStore,
-
     /// Resolve and persist custom keywords via the `dovecot-keywords` sidecar.
     pub dovecot_keywords: bool,
     /// Header used to ferry custom keywords inline with the body.
@@ -112,7 +113,7 @@ pub struct MaildirClient {
 impl MaildirClient {
     /// Builds a client rooted at `root` in fs layout without filesystem
     /// checks. Flip `client.store.maildirpp = true` for Maildir++.
-    pub fn new(root: impl Into<FsPath>) -> Self {
+    pub fn new(root: impl Into<MaildirFsPath>) -> Self {
         Self {
             store: MaildirStore {
                 root: root.into(),
@@ -166,7 +167,7 @@ impl MaildirClient {
                         match fs::read_dir(path.as_str()) {
                             Ok(iter) => {
                                 for entry in iter {
-                                    names.insert(FsPath::from(entry?.path()));
+                                    names.insert(MaildirFsPath::from(entry?.path()));
                                 }
                             }
                             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
@@ -241,21 +242,21 @@ impl MaildirClient {
         }
     }
 
-    /// Runs [`DovecotLoad`] for `maildir`.
+    /// Runs [`MaildirDovecotLoad`] for `maildir`.
     pub fn load_dovecot_keywords(
         &self,
         maildir: &Maildir,
     ) -> Result<BTreeMap<char, String>, MaildirClientError> {
-        self.run(DovecotLoad::new(maildir))
+        self.run(MaildirDovecotLoad::new(maildir))
     }
 
-    /// Runs [`DovecotStore`] for `maildir` with the given table.
+    /// Runs [`MaildirDovecotStore`] for `maildir` with the given table.
     pub fn store_dovecot_keywords(
         &self,
         maildir: &Maildir,
         table: &BTreeMap<char, String>,
     ) -> Result<(), MaildirClientError> {
-        self.run(DovecotStore::new(maildir, table))
+        self.run(MaildirDovecotStore::new(maildir, table))
     }
 
     /// Opens an existing Maildir named `name`, resolving the logical path
@@ -280,9 +281,11 @@ impl MaildirClient {
 
         Ok(Maildir::from_path(root))
     }
+}
 
-    // ---- Maildir lifecycle ------------------------------------------
-
+/// Maildir lifecycle helpers: create, delete, list and rename whole
+/// Maildirs by logical mailbox name.
+impl MaildirClient {
     /// Runs [`MaildirCreate`] for the logical mailbox `name`.
     pub fn create_maildir(&self, name: impl Into<MaildirPath>) -> Result<(), MaildirClientError> {
         self.run(MaildirCreate::new(&self.store, name.into()))
@@ -308,9 +311,11 @@ impl MaildirClient {
     ) -> Result<(), MaildirClientError> {
         self.run(MaildirRename::new(&self.store, from.into(), to.into()))
     }
+}
 
-    // ---- Flags ------------------------------------------------------
-
+/// Flag helpers: add, remove and set flags on an entry, resolving
+/// custom keywords through the configured strategy.
+impl MaildirClient {
     /// Runs [`MaildirFlagsAdd`] for `id` in `maildir`; resolves keywords
     /// through [`Self::dovecot_keywords`] if set.
     pub fn add_flags(
@@ -346,15 +351,16 @@ impl MaildirClient {
         self.resolve_keywords(&maildir, &mut flags)?;
         self.run(MaildirFlagsSet::new(maildir, id, flags))
     }
+}
 
-    // ---- Entries ---------------------------------------------------
-
+/// Entry helpers: locate, read, list, store, copy and move entries.
+impl MaildirClient {
     /// Runs [`MaildirEntryLocate`] for `id` in `maildir`.
     pub fn locate(
         &self,
         maildir: Maildir,
         id: impl ToString,
-    ) -> Result<(FsPath, MaildirSubdir, MaildirFlags), MaildirClientError> {
+    ) -> Result<(MaildirFsPath, MaildirSubdir, MaildirFlags), MaildirClientError> {
         let MaildirEntryLocateOutput {
             path,
             subdir,
@@ -457,7 +463,7 @@ impl MaildirClient {
         subdir: MaildirSubdir,
         mut flags: MaildirFlags,
         mut contents: Vec<u8>,
-    ) -> Result<(String, FsPath), MaildirClientError> {
+    ) -> Result<(String, MaildirFsPath), MaildirClientError> {
         let keywords = flags.drain_keywords();
 
         if let Some(header) = self.keywords_header {
@@ -481,7 +487,7 @@ impl MaildirClient {
                     }
                     None => {
                         log::warn!(
-                            "dovecot-keywords table full; dropping keyword `{keyword}` at {}",
+                            "dovecot-keywords table full, dropping keyword {keyword:?} at {}",
                             maildir.path()
                         );
                     }

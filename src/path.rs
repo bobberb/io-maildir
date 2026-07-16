@@ -1,5 +1,5 @@
 //! Two path flavours used across the crate: literal filesystem paths
-//! ([`FsPath`]) and logical mailbox-hierarchy paths ([`MaildirPath`]).
+//! ([`MaildirFsPath`]) and logical mailbox-hierarchy paths ([`MaildirPath`]).
 //! A [`crate::store::MaildirStore`] translates between them under its
 //! configured layout (fs nested, or Maildir++ flat-dotted).
 
@@ -13,9 +13,9 @@ use alloc::string::String;
 /// both Unix and Windows, so no boundary conversion is needed in the client
 /// layer.
 #[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct FsPath(String);
+pub struct MaildirFsPath(String);
 
-impl FsPath {
+impl MaildirFsPath {
     /// Builds a new path from `s` without validation.
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
@@ -98,26 +98,26 @@ impl FsPath {
     }
 }
 
-impl fmt::Display for FsPath {
+impl fmt::Display for MaildirFsPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.0, f)
     }
 }
 
-impl From<String> for FsPath {
+impl From<String> for MaildirFsPath {
     fn from(s: String) -> Self {
         Self(s)
     }
 }
 
-impl From<&str> for FsPath {
+impl From<&str> for MaildirFsPath {
     fn from(s: &str) -> Self {
         Self(s.into())
     }
 }
 
 #[cfg(feature = "client")]
-impl From<std::path::PathBuf> for FsPath {
+impl From<std::path::PathBuf> for MaildirFsPath {
     fn from(path: std::path::PathBuf) -> Self {
         let s = path.to_string_lossy().into_owned();
         #[cfg(windows)]
@@ -127,7 +127,7 @@ impl From<std::path::PathBuf> for FsPath {
 }
 
 #[cfg(feature = "client")]
-impl From<&std::path::Path> for FsPath {
+impl From<&std::path::Path> for MaildirFsPath {
     fn from(path: &std::path::Path) -> Self {
         let s = path.to_string_lossy().into_owned();
         #[cfg(windows)]
@@ -137,20 +137,20 @@ impl From<&std::path::Path> for FsPath {
 }
 
 #[cfg(feature = "client")]
-impl From<FsPath> for std::path::PathBuf {
-    fn from(path: FsPath) -> Self {
+impl From<MaildirFsPath> for std::path::PathBuf {
+    fn from(path: MaildirFsPath) -> Self {
         Self::from(path.0)
     }
 }
 
-impl AsRef<str> for FsPath {
+impl AsRef<str> for MaildirFsPath {
     fn as_ref(&self) -> &str {
         &self.0
     }
 }
 
 #[cfg(feature = "client")]
-impl AsRef<std::path::Path> for FsPath {
+impl AsRef<std::path::Path> for MaildirFsPath {
     fn as_ref(&self) -> &std::path::Path {
         std::path::Path::new(&self.0)
     }
@@ -161,7 +161,7 @@ impl AsRef<std::path::Path> for FsPath {
 ///
 /// The empty path designates the store root itself (which is INBOX in
 /// Maildir++). A [`crate::store::MaildirStore`] turns this into a
-/// concrete [`FsPath`] under its layout: fs nested ("Foo/Bar" →
+/// concrete [`MaildirFsPath`] under its layout: fs nested ("Foo/Bar" →
 /// `<root>/Foo/Bar`) or Maildir++ flat-dotted ("Foo/Bar" →
 /// `<root>/.Foo.Bar`).
 #[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -213,7 +213,7 @@ impl AsRef<str> for MaildirPath {
 mod tests {
     use alloc::vec::Vec;
 
-    use crate::path::{FsPath, MaildirPath};
+    use crate::path::{MaildirFsPath, MaildirPath};
 
     #[test]
     fn maildir_path_components_skips_empties() {
@@ -231,55 +231,55 @@ mod tests {
 
     #[test]
     fn join_inserts_separator() {
-        let p = FsPath::new("a");
+        let p = MaildirFsPath::new("a");
         assert_eq!(p.join("b").as_str(), "a/b");
     }
 
     #[test]
     fn join_on_empty_skips_separator() {
-        let p = FsPath::default();
+        let p = MaildirFsPath::default();
         assert_eq!(p.join("a").as_str(), "a");
     }
 
     #[test]
     fn join_normalises_trailing_separator() {
-        let p = FsPath::new("a/");
+        let p = MaildirFsPath::new("a/");
         assert_eq!(p.join("b").as_str(), "a/b");
     }
 
     #[test]
     fn file_name_returns_last_segment() {
-        assert_eq!(FsPath::new("a/b/c").file_name(), Some("c"));
-        assert_eq!(FsPath::new("c").file_name(), Some("c"));
-        assert_eq!(FsPath::default().file_name(), None);
-        assert_eq!(FsPath::new("a/").file_name(), None);
+        assert_eq!(MaildirFsPath::new("a/b/c").file_name(), Some("c"));
+        assert_eq!(MaildirFsPath::new("c").file_name(), Some("c"));
+        assert_eq!(MaildirFsPath::default().file_name(), None);
+        assert_eq!(MaildirFsPath::new("a/").file_name(), None);
     }
 
     #[test]
     fn parent_returns_path_without_last_segment() {
-        assert_eq!(FsPath::new("a/b/c").parent(), Some("a/b"));
-        assert_eq!(FsPath::new("a").parent(), None);
+        assert_eq!(MaildirFsPath::new("a/b/c").parent(), Some("a/b"));
+        assert_eq!(MaildirFsPath::new("a").parent(), None);
     }
 
     #[test]
     fn with_file_name_replaces_last_segment() {
-        let p = FsPath::new("a/b/c");
+        let p = MaildirFsPath::new("a/b/c");
         assert_eq!(p.with_file_name("d").as_str(), "a/b/d");
 
-        let p = FsPath::new("a");
+        let p = MaildirFsPath::new("a");
         assert_eq!(p.with_file_name("z").as_str(), "z");
     }
 
     #[test]
     fn strip_prefix_removes_leading_separator() {
-        let p = FsPath::new("root/sub/leaf");
-        let root = FsPath::new("root");
+        let p = MaildirFsPath::new("root/sub/leaf");
+        let root = MaildirFsPath::new("root");
         assert_eq!(p.strip_prefix(&root), Some("sub/leaf"));
     }
 
     #[test]
     fn components_skips_empties() {
-        let p = FsPath::new("/a//b/");
+        let p = MaildirFsPath::new("/a//b/");
         let parts: Vec<&str> = p.components().collect();
         assert_eq!(parts, ["a", "b"]);
     }

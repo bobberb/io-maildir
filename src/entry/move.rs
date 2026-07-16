@@ -17,24 +17,25 @@ use core::fmt;
 
 use alloc::string::{String, ToString};
 
-use log::trace;
+use log::debug;
 use thiserror::Error;
 
 use crate::{
     coroutine::*,
+    entry::INFORMATIONAL_SUFFIX_SEPARATOR,
     entry::locate::*,
-    entry::types::INFORMATIONAL_SUFFIX_SEPARATOR,
-    maildir::types::{Maildir, MaildirSubdir},
+    maildir::{Maildir, MaildirSubdir},
     maildir_try,
-    path::FsPath,
+    path::MaildirFsPath,
 };
 
 /// Failure causes during a [`MaildirEntryMove`] step.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirEntryMoveError {
+    /// A reply arrived that does not match the awaited step.
     #[error("Maildir message move failed: unexpected arg {0:?}")]
     UnexpectedArg(Option<MaildirReply>),
-
+    /// The inner locate step failed.
     #[error(transparent)]
     Locate(#[from] MaildirEntryLocateError),
 }
@@ -50,6 +51,8 @@ pub struct MaildirEntryMove {
 }
 
 impl MaildirEntryMove {
+    /// Builds a coroutine moving the Maildir entry into the target
+    /// Maildir.
     pub fn new(
         id: impl ToString,
         source: Maildir,
@@ -74,8 +77,6 @@ impl MaildirCoroutine for MaildirEntryMove {
         &mut self,
         arg: Option<MaildirReply>,
     ) -> MaildirCoroutineState<Self::Yield, Self::Return> {
-        trace!("entry move: {}", self.state);
-
         match (&mut self.state, arg) {
             (State::Locate(c), arg) => {
                 let out = maildir_try!(c, arg);
@@ -87,6 +88,7 @@ impl MaildirCoroutine for MaildirEntryMove {
                 MaildirCoroutineState::Yielded(MaildirYield::WantsRename(pairs))
             }
             (State::AwaitRename, Some(MaildirReply::Rename)) => {
+                debug!("moved entry");
                 MaildirCoroutineState::Complete(Ok(()))
             }
             (_, arg) => {
@@ -112,7 +114,7 @@ impl fmt::Display for State {
     }
 }
 
-fn build_target_path(target: &Maildir, subdir: &MaildirSubdir, id: &str) -> FsPath {
+fn build_target_path(target: &Maildir, subdir: &MaildirSubdir, id: &str) -> MaildirFsPath {
     match subdir {
         MaildirSubdir::Cur => {
             let name = format!("{id}{INFORMATIONAL_SUFFIX_SEPARATOR}2,");
@@ -125,7 +127,7 @@ fn build_target_path(target: &Maildir, subdir: &MaildirSubdir, id: &str) -> FsPa
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::entry::r#move::*;
 
     fn source() -> Maildir {
         Maildir::from_path("root/src")
@@ -138,13 +140,11 @@ mod tests {
     #[test]
     fn unexpected_reply_returns_error() {
         let mut cor = MaildirEntryMove::new("abc", source(), target(), None);
-        let _ = expect_wants_file_exists(&mut cor);
+        expect_wants_file_exists(&mut cor);
 
         let err = expect_complete_err(&mut cor, Some(MaildirReply::DirCreate));
         assert!(matches!(err, MaildirEntryMoveError::Locate(_)));
     }
-
-    // --- utils
 
     fn expect_wants_file_exists(cor: &mut MaildirEntryMove) {
         match cor.resume(None) {

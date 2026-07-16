@@ -8,7 +8,7 @@ use alloc::{
     vec::Vec,
 };
 
-use crate::flag::types::KeywordHeader;
+use crate::flag::KeywordHeader;
 
 /// Extracts values from `header`, splitting on `header.separator()`.
 ///
@@ -217,7 +217,7 @@ fn uses_crlf(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::entry::headers::*;
 
     #[test]
     fn extract_x_keywords_comma_separated() {

@@ -24,22 +24,23 @@ use alloc::{
     string::{String, ToString},
 };
 
-use log::trace;
+use log::{debug, trace};
 use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    flag::types::MaildirFlags,
-    maildir::types::{Maildir, MaildirSubdir},
-    path::FsPath,
+    flag::MaildirFlags,
+    maildir::{Maildir, MaildirSubdir},
+    path::MaildirFsPath,
 };
 
 /// Failure causes during a [`MaildirEntryLocate`] step.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirEntryLocateError {
+    /// A reply arrived that does not match the awaited step.
     #[error("Maildir message locate failed: unexpected arg {0:?}")]
     UnexpectedArg(Option<MaildirReply>),
-
+    /// No entry with the given ID exists in the Maildir.
     #[error("Maildir message locate failed: message {0} not found")]
     NotFound(String),
 }
@@ -47,8 +48,11 @@ pub enum MaildirEntryLocateError {
 /// Successful output of [`MaildirEntryLocate`].
 #[derive(Clone, Debug)]
 pub struct MaildirEntryLocateOutput {
-    pub path: FsPath,
+    /// The filesystem path of the located entry.
+    pub path: MaildirFsPath,
+    /// The subdir the entry was found in.
     pub subdir: MaildirSubdir,
+    /// The flags parsed from the entry file name.
     pub flags: MaildirFlags,
 }
 
@@ -62,6 +66,7 @@ pub struct MaildirEntryLocate {
 }
 
 impl MaildirEntryLocate {
+    /// Builds a coroutine locating the Maildir entry with the given ID.
     pub fn new(maildir: Maildir, id: impl ToString) -> Self {
         Self {
             maildir,
@@ -79,8 +84,6 @@ impl MaildirCoroutine for MaildirEntryLocate {
         &mut self,
         arg: Option<MaildirReply>,
     ) -> MaildirCoroutineState<Self::Yield, Self::Return> {
-        trace!("entry locate: {}", self.state);
-
         match (&mut self.state, arg) {
             (State::Start, None) => {
                 let new_path = self.maildir.new().join(&self.id);
@@ -96,6 +99,8 @@ impl MaildirCoroutine for MaildirEntryLocate {
                         subdir: MaildirSubdir::New,
                         flags: MaildirFlags::default(),
                     };
+                    debug!("located entry");
+                    trace!("path: {}", out.path);
                     return MaildirCoroutineState::Complete(Ok(out));
                 }
 
@@ -105,6 +110,8 @@ impl MaildirCoroutine for MaildirEntryLocate {
                         subdir: MaildirSubdir::Tmp,
                         flags: MaildirFlags::default(),
                     };
+                    debug!("located entry");
+                    trace!("path: {}", out.path);
                     return MaildirCoroutineState::Complete(Ok(out));
                 }
 
@@ -130,6 +137,8 @@ impl MaildirCoroutine for MaildirEntryLocate {
                         subdir: MaildirSubdir::Cur,
                         flags,
                     };
+                    debug!("located entry");
+                    trace!("path: {}", out.path);
                     return MaildirCoroutineState::Complete(Ok(out));
                 }
 
@@ -147,7 +156,10 @@ impl MaildirCoroutine for MaildirEntryLocate {
 #[derive(Clone, Debug)]
 enum State {
     Start,
-    AwaitProbe { new_path: FsPath, tmp_path: FsPath },
+    AwaitProbe {
+        new_path: MaildirFsPath,
+        tmp_path: MaildirFsPath,
+    },
     AwaitScan,
 }
 
@@ -165,7 +177,7 @@ impl fmt::Display for State {
 mod tests {
     use alloc::collections::BTreeMap;
 
-    use super::*;
+    use crate::entry::locate::*;
 
     fn maildir() -> Maildir {
         Maildir::from_path("root")
@@ -176,8 +188,8 @@ mod tests {
         let mut cor = MaildirEntryLocate::new(maildir(), "abc");
 
         let probes = expect_wants_file_exists(&mut cor);
-        let new_path = FsPath::from("root/new/abc");
-        let tmp_path = FsPath::from("root/tmp/abc");
+        let new_path = MaildirFsPath::from("root/new/abc");
+        let tmp_path = MaildirFsPath::from("root/tmp/abc");
         assert!(probes.contains(&new_path));
         assert!(probes.contains(&tmp_path));
 
@@ -193,20 +205,20 @@ mod tests {
     fn not_found_returns_error() {
         let mut cor = MaildirEntryLocate::new(maildir(), "abc");
 
-        let _ = expect_wants_file_exists(&mut cor);
+        expect_wants_file_exists(&mut cor);
 
         let mut probe = BTreeMap::new();
-        probe.insert(FsPath::from("root/new/abc"), false);
-        probe.insert(FsPath::from("root/tmp/abc"), false);
+        probe.insert(MaildirFsPath::from("root/new/abc"), false);
+        probe.insert(MaildirFsPath::from("root/tmp/abc"), false);
         match cor.resume(Some(MaildirReply::FileExists(probe))) {
             MaildirCoroutineState::Yielded(MaildirYield::WantsDirRead(paths)) => {
-                assert!(paths.contains(&FsPath::from("root/cur")));
+                assert!(paths.contains(&MaildirFsPath::from("root/cur")));
             }
             state => panic!("expected WantsDirRead, got {state:?}"),
         }
 
         let mut entries = BTreeMap::new();
-        entries.insert(FsPath::from("root/cur"), BTreeSet::new());
+        entries.insert(MaildirFsPath::from("root/cur"), BTreeSet::new());
         let err = expect_complete_err(&mut cor, Some(MaildirReply::DirRead(entries)));
         assert!(matches!(err, MaildirEntryLocateError::NotFound(_)));
     }
@@ -214,15 +226,13 @@ mod tests {
     #[test]
     fn unexpected_reply_returns_error() {
         let mut cor = MaildirEntryLocate::new(maildir(), "abc");
-        let _ = expect_wants_file_exists(&mut cor);
+        expect_wants_file_exists(&mut cor);
 
         let err = expect_complete_err(&mut cor, Some(MaildirReply::DirCreate));
         assert!(matches!(err, MaildirEntryLocateError::UnexpectedArg(_)));
     }
 
-    // --- utils
-
-    fn expect_wants_file_exists(cor: &mut MaildirEntryLocate) -> BTreeSet<FsPath> {
+    fn expect_wants_file_exists(cor: &mut MaildirEntryLocate) -> BTreeSet<MaildirFsPath> {
         match cor.resume(None) {
             MaildirCoroutineState::Yielded(MaildirYield::WantsFileExists(paths)) => paths,
             state => panic!("expected WantsFileExists, got {state:?}"),

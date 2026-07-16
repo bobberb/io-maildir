@@ -23,18 +23,19 @@ use core::{fmt, mem};
 
 use alloc::vec::Vec;
 
-use log::trace;
+use log::debug;
 use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    path::{FsPath, MaildirPath},
+    path::{MaildirFsPath, MaildirPath},
     store::MaildirStore,
 };
 
 /// Failure causes during a [`MaildirRename`] step.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirRenameError {
+    /// A reply arrived that does not match the awaited step.
     #[error("Maildir rename failed: unexpected arg {0:?}")]
     UnexpectedArg(Option<MaildirReply>),
 }
@@ -49,6 +50,8 @@ pub struct MaildirRename {
 }
 
 impl MaildirRename {
+    /// Builds a coroutine renaming the Maildir at `from` to `to`, both
+    /// logical mailbox paths resolved through `store`.
     pub fn new(store: &MaildirStore, from: MaildirPath, to: MaildirPath) -> Self {
         let from = store.resolve(&from);
         let to = store.resolve(&to);
@@ -69,8 +72,6 @@ impl MaildirCoroutine for MaildirRename {
         &mut self,
         arg: Option<MaildirReply>,
     ) -> MaildirCoroutineState<Self::Yield, Self::Return> {
-        trace!("maildir rename: {}", self.state);
-
         match (&mut self.state, arg) {
             (State::Start { pairs }, None) => {
                 let pairs = mem::take(pairs);
@@ -78,6 +79,7 @@ impl MaildirCoroutine for MaildirRename {
                 MaildirCoroutineState::Yielded(MaildirYield::WantsRename(pairs))
             }
             (State::AwaitRename, Some(MaildirReply::Rename)) => {
+                debug!("renamed maildir");
                 MaildirCoroutineState::Complete(Ok(()))
             }
             (_, arg) => {
@@ -90,7 +92,9 @@ impl MaildirCoroutine for MaildirRename {
 
 #[derive(Debug)]
 enum State {
-    Start { pairs: Vec<(FsPath, FsPath)> },
+    Start {
+        pairs: Vec<(MaildirFsPath, MaildirFsPath)>,
+    },
     AwaitRename,
 }
 
@@ -105,18 +109,18 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::maildir::rename::*;
 
     fn fs_store() -> MaildirStore {
         MaildirStore {
-            root: FsPath::from("root"),
+            root: MaildirFsPath::from("root"),
             maildirpp: false,
         }
     }
 
     fn maildirpp_store() -> MaildirStore {
         MaildirStore {
-            root: FsPath::from("root"),
+            root: MaildirFsPath::from("root"),
             maildirpp: true,
         }
     }
@@ -131,8 +135,8 @@ mod tests {
 
         let pairs = expect_wants_rename(&mut cor);
         assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0].0, FsPath::from("root/Old"));
-        assert_eq!(pairs[0].1, FsPath::from("root/New"));
+        assert_eq!(pairs[0].0, MaildirFsPath::from("root/Old"));
+        assert_eq!(pairs[0].1, MaildirFsPath::from("root/New"));
 
         expect_complete_ok(&mut cor, Some(MaildirReply::Rename));
     }
@@ -146,8 +150,8 @@ mod tests {
         );
 
         let pairs = expect_wants_rename(&mut cor);
-        assert_eq!(pairs[0].0, FsPath::from("root/.Foo.Bar"));
-        assert_eq!(pairs[0].1, FsPath::from("root/.Baz.Qux"));
+        assert_eq!(pairs[0].0, MaildirFsPath::from("root/.Foo.Bar"));
+        assert_eq!(pairs[0].1, MaildirFsPath::from("root/.Baz.Qux"));
     }
 
     #[test]
@@ -163,9 +167,7 @@ mod tests {
         assert!(matches!(err, MaildirRenameError::UnexpectedArg(_)));
     }
 
-    // --- utils
-
-    fn expect_wants_rename(cor: &mut MaildirRename) -> Vec<(FsPath, FsPath)> {
+    fn expect_wants_rename(cor: &mut MaildirRename) -> Vec<(MaildirFsPath, MaildirFsPath)> {
         match cor.resume(None) {
             MaildirCoroutineState::Yielded(MaildirYield::WantsRename(pairs)) => pairs,
             state => panic!("expected WantsRename, got {state:?}"),

@@ -17,24 +17,25 @@ use core::fmt;
 
 use alloc::string::{String, ToString};
 
-use log::trace;
+use log::debug;
 use thiserror::Error;
 
 use crate::{
     coroutine::*,
+    entry::INFORMATIONAL_SUFFIX_SEPARATOR,
     entry::locate::*,
-    entry::types::INFORMATIONAL_SUFFIX_SEPARATOR,
-    maildir::types::{Maildir, MaildirSubdir},
+    maildir::{Maildir, MaildirSubdir},
     maildir_try,
-    path::FsPath,
+    path::MaildirFsPath,
 };
 
 /// Failure causes during a [`MaildirEntryCopy`] step.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirEntryCopyError {
+    /// A reply arrived that does not match the awaited step.
     #[error("Maildir message copy failed: unexpected arg {0:?}")]
     UnexpectedArg(Option<MaildirReply>),
-
+    /// The inner locate step failed.
     #[error(transparent)]
     Locate(#[from] MaildirEntryLocateError),
 }
@@ -50,6 +51,8 @@ pub struct MaildirEntryCopy {
 }
 
 impl MaildirEntryCopy {
+    /// Builds a coroutine copying the Maildir entry into the target
+    /// Maildir.
     pub fn new(
         id: impl ToString,
         source: Maildir,
@@ -74,8 +77,6 @@ impl MaildirCoroutine for MaildirEntryCopy {
         &mut self,
         arg: Option<MaildirReply>,
     ) -> MaildirCoroutineState<Self::Yield, Self::Return> {
-        trace!("entry copy: {}", self.state);
-
         match (&mut self.state, arg) {
             (State::Locate(c), arg) => {
                 let out = maildir_try!(c, arg);
@@ -86,7 +87,10 @@ impl MaildirCoroutine for MaildirEntryCopy {
                 self.state = State::AwaitCopy;
                 MaildirCoroutineState::Yielded(MaildirYield::WantsCopy(pairs))
             }
-            (State::AwaitCopy, Some(MaildirReply::Copy)) => MaildirCoroutineState::Complete(Ok(())),
+            (State::AwaitCopy, Some(MaildirReply::Copy)) => {
+                debug!("copied entry");
+                MaildirCoroutineState::Complete(Ok(()))
+            }
             (_, arg) => {
                 let err = MaildirEntryCopyError::UnexpectedArg(arg);
                 MaildirCoroutineState::Complete(Err(err))
@@ -110,7 +114,7 @@ impl fmt::Display for State {
     }
 }
 
-fn build_target_path(target: &Maildir, subdir: &MaildirSubdir, id: &str) -> FsPath {
+fn build_target_path(target: &Maildir, subdir: &MaildirSubdir, id: &str) -> MaildirFsPath {
     match subdir {
         MaildirSubdir::Cur => {
             let name = format!("{id}{INFORMATIONAL_SUFFIX_SEPARATOR}2,");
@@ -123,7 +127,7 @@ fn build_target_path(target: &Maildir, subdir: &MaildirSubdir, id: &str) -> FsPa
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::entry::copy::*;
 
     fn source() -> Maildir {
         Maildir::from_path("root/src")
@@ -136,13 +140,11 @@ mod tests {
     #[test]
     fn unexpected_reply_returns_error() {
         let mut cor = MaildirEntryCopy::new("abc", source(), target(), None);
-        let _ = expect_wants_file_exists(&mut cor);
+        expect_wants_file_exists(&mut cor);
 
         let err = expect_complete_err(&mut cor, Some(MaildirReply::DirCreate));
         assert!(matches!(err, MaildirEntryCopyError::Locate(_)));
     }
-
-    // --- utils
 
     fn expect_wants_file_exists(cor: &mut MaildirEntryCopy) {
         match cor.resume(None) {

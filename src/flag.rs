@@ -1,8 +1,19 @@
-//! Maildir flag set: IANA letter flags + custom keywords.
+//! Maildir flags: the [`MaildirFlags`] set, the individual
+//! [`MaildirFlag`] letters and keywords, and the [`KeywordHeader`]
+//! carrying custom keywords inline with a message body.
+//!
+//! The I/O-free coroutines rewriting the `:2,<flags>` suffix on entry
+//! filenames live in the submodules next to this file: [`add`],
+//! [`remove`] and [`set`].
 
-use core::fmt;
-use core::fmt::Write as _;
-use core::str::FromStr;
+pub mod add;
+pub mod remove;
+pub mod set;
+
+use core::{
+    fmt::{self, Write as _},
+    str::FromStr,
+};
 
 use alloc::{
     collections::{BTreeMap, BTreeSet},
@@ -12,19 +23,20 @@ use alloc::{
 
 use log::trace;
 
-use crate::path::FsPath;
+use crate::path::MaildirFsPath;
 
 /// A set of Maildir flags plus opaque info-section letters.
 #[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct MaildirFlags {
+    /// Named flags and custom keywords.
     flags: BTreeSet<MaildirFlag>,
     /// Resolved dovecot `a..z` slot letters with no named-variant
     /// counterpart, appended verbatim by [`fmt::Display`].
     extra_letters: BTreeSet<char>,
 }
 
-impl From<&FsPath> for MaildirFlags {
-    fn from(path: &FsPath) -> Self {
+impl From<&MaildirFsPath> for MaildirFlags {
+    fn from(path: &MaildirFsPath) -> Self {
         let Some(file_name) = path.file_name() else {
             return Default::default();
         };
@@ -52,23 +64,28 @@ impl fmt::Display for MaildirFlags {
 }
 
 impl MaildirFlags {
+    /// Returns `true` when no flag, keyword or extra letter is set.
     pub fn is_empty(&self) -> bool {
         self.flags.is_empty() && self.extra_letters.is_empty()
     }
 
+    /// Returns the total count of flags, keywords and extra letters.
     pub fn len(&self) -> usize {
         self.flags.len() + self.extra_letters.len()
     }
 
+    /// Returns `true` when `flag` is present in the set.
     pub fn contains(&self, flag: &MaildirFlag) -> bool {
         self.flags.contains(flag)
     }
 
+    /// Merges every flag, keyword and extra letter of `flags` in.
     pub fn extend(&mut self, flags: MaildirFlags) {
         self.flags.extend(flags.flags);
         self.extra_letters.extend(flags.extra_letters);
     }
 
+    /// Removes from this set every flag and letter present in `flags`.
     pub fn difference(&mut self, flags: &MaildirFlags) {
         self.flags = self.flags.difference(&flags.flags).cloned().collect();
         self.extra_letters = self
@@ -78,17 +95,19 @@ impl MaildirFlags {
             .collect();
     }
 
+    /// Iterates over the named flags and keywords, sorted.
     pub fn iter(&self) -> impl Iterator<Item = &MaildirFlag> {
         self.flags.iter()
     }
 
+    /// Inserts `flag`, returning `true` when it was not already set.
     pub fn insert(&mut self, flag: MaildirFlag) -> bool {
         self.flags.insert(flag)
     }
 
-    /// Like [`From<&MaildirPath>`] but resolves lowercase `a..z`
-    /// letters through a dovecot-keywords table.
-    pub fn with_dovecot(path: &FsPath, table: &BTreeMap<char, String>) -> Self {
+    /// Like [`From<&MaildirFsPath>`] but resolves lowercase `a..z` letters
+    /// through a dovecot-keywords table.
+    pub fn with_dovecot(path: &MaildirFsPath, table: &BTreeMap<char, String>) -> Self {
         let Some(file_name) = path.file_name() else {
             return Default::default();
         };
@@ -169,11 +188,17 @@ impl FromIterator<MaildirFlag> for MaildirFlags {
 /// A single Maildir flag: a standard IANA letter or a custom keyword.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum MaildirFlag {
+    /// The message has been forwarded (`P`).
     Passed,
+    /// The message has been replied to (`R`).
     Replied,
+    /// The message has been read (`S`).
     Seen,
+    /// The message is marked for deletion (`T`).
     Trashed,
+    /// The message is a draft (`D`).
     Draft,
+    /// The message is flagged for later attention (`F`).
     Flagged,
     /// Custom keyword with no info-section letter; serialised via
     /// dovecot-keywords or a configured header.
@@ -181,6 +206,8 @@ pub enum MaildirFlag {
 }
 
 impl MaildirFlag {
+    /// Maps an info-section letter to its named flag, or [`None`] for
+    /// any other character.
     pub fn from_char(c: char) -> Option<MaildirFlag> {
         match c {
             'P' => Some(MaildirFlag::Passed),
@@ -190,16 +217,19 @@ impl MaildirFlag {
             'D' => Some(MaildirFlag::Draft),
             'F' => Some(MaildirFlag::Flagged),
             c => {
-                trace!("invalid maildir flag `{c}`, ignoring");
+                trace!("invalid maildir flag {c:?}, ignoring");
                 None
             }
         }
     }
 
+    /// Builds a [`MaildirFlag::Keyword`] from `s`.
     pub fn keyword(s: impl Into<String>) -> Self {
         Self::Keyword(s.into())
     }
 
+    /// Returns the keyword string when this is a
+    /// [`MaildirFlag::Keyword`], else [`None`].
     pub fn as_keyword(&self) -> Option<&str> {
         match self {
             Self::Keyword(s) => Some(s.as_str()),
@@ -230,11 +260,14 @@ impl fmt::Display for MaildirFlag {
 /// separated); `XLabel` follows mutt / notmuch (space-separated).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KeywordHeader {
+    /// The `X-Keywords` header, comma-separated.
     XKeywords,
+    /// The `X-Label` header, space-separated.
     XLabel,
 }
 
 impl KeywordHeader {
+    /// Returns the on-the-wire header name.
     pub fn header_name(&self) -> &'static str {
         match self {
             Self::XKeywords => "X-Keywords",
@@ -242,6 +275,7 @@ impl KeywordHeader {
         }
     }
 
+    /// Returns the character separating keywords in the header value.
     pub fn separator(&self) -> char {
         match self {
             Self::XKeywords => ',',
@@ -257,7 +291,7 @@ impl FromStr for KeywordHeader {
         match s.to_ascii_lowercase().as_str() {
             "x-keywords" | "xkeywords" | "x_keywords" => Ok(Self::XKeywords),
             "x-label" | "xlabel" | "x_label" => Ok(Self::XLabel),
-            _ => Err("expected `x-keywords` or `x-label`"),
+            _ => Err("expected x-keywords or x-label"),
         }
     }
 }

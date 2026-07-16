@@ -20,19 +20,20 @@ use core::{fmt, mem};
 
 use alloc::collections::{BTreeMap, BTreeSet};
 
-use log::trace;
+use log::debug;
 use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    maildir::types::{CUR, Maildir, NEW, TMP},
-    path::FsPath,
+    maildir::{CUR, Maildir, NEW, TMP},
+    path::MaildirFsPath,
     store::MaildirStore,
 };
 
 /// Failure causes during a [`MaildirList`] step.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirListError {
+    /// A reply arrived that does not match the awaited step.
     #[error("Maildir list failed: unexpected arg {0:?}")]
     UnexpectedArg(Option<MaildirReply>),
 }
@@ -53,6 +54,8 @@ pub struct MaildirList {
 }
 
 impl MaildirList {
+    /// Builds a coroutine listing every Maildir reachable from
+    /// `store`'s root, following the store's layout flag.
     pub fn new(store: &MaildirStore) -> Self {
         Self {
             state: State::Start {
@@ -71,8 +74,6 @@ impl MaildirCoroutine for MaildirList {
         &mut self,
         arg: Option<MaildirReply>,
     ) -> MaildirCoroutineState<Self::Yield, Self::Return> {
-        trace!("maildir list: {}", self.state);
-
         match (&mut self.state, arg) {
             (State::Start { root }, None) => {
                 let pending = BTreeSet::from_iter([mem::take(root)]);
@@ -126,6 +127,7 @@ impl MaildirCoroutine for MaildirList {
                 }
 
                 if candidates.is_empty() {
+                    debug!("listed {} maildirs", found.len());
                     return MaildirCoroutineState::Complete(Ok(found));
                 }
 
@@ -135,7 +137,7 @@ impl MaildirCoroutine for MaildirList {
                     markers.insert(cand.join(NEW), cand.clone());
                     markers.insert(cand.join(TMP), cand.clone());
                 }
-                let probes: BTreeSet<FsPath> = markers.keys().cloned().collect();
+                let probes: BTreeSet<MaildirFsPath> = markers.keys().cloned().collect();
 
                 self.state = State::AwaitProbe {
                     markers,
@@ -156,7 +158,7 @@ impl MaildirCoroutine for MaildirList {
                 let next_pending = mem::take(next_pending);
                 let mut found = mem::take(found);
 
-                let mut hits: BTreeMap<FsPath, u8> = BTreeMap::new();
+                let mut hits: BTreeMap<MaildirFsPath, u8> = BTreeMap::new();
                 for (marker, candidate) in markers {
                     if probes.get(&marker).copied().unwrap_or(false) {
                         *hits.entry(candidate).or_insert(0) += 1;
@@ -170,6 +172,7 @@ impl MaildirCoroutine for MaildirList {
                 }
 
                 if next_pending.is_empty() {
+                    debug!("listed {} maildirs", found.len());
                     return MaildirCoroutineState::Complete(Ok(found));
                 }
 
@@ -190,15 +193,15 @@ impl MaildirCoroutine for MaildirList {
 #[derive(Debug)]
 enum State {
     Start {
-        root: FsPath,
+        root: MaildirFsPath,
     },
     AwaitRead {
         probe_pending: bool,
         found: BTreeSet<Maildir>,
     },
     AwaitProbe {
-        markers: BTreeMap<FsPath, FsPath>,
-        next_pending: BTreeSet<FsPath>,
+        markers: BTreeMap<MaildirFsPath, MaildirFsPath>,
+        next_pending: BTreeSet<MaildirFsPath>,
         found: BTreeSet<Maildir>,
     },
 }
@@ -221,14 +224,14 @@ mod tests {
 
     fn fs_store() -> MaildirStore {
         MaildirStore {
-            root: FsPath::from("root"),
+            root: MaildirFsPath::from("root"),
             maildirpp: false,
         }
     }
 
     fn maildirpp_store() -> MaildirStore {
         MaildirStore {
-            root: FsPath::from("root"),
+            root: MaildirFsPath::from("root"),
             maildirpp: true,
         }
     }
@@ -239,7 +242,7 @@ mod tests {
         expect_wants_dir_read(&mut cor, None);
 
         let mut entries = BTreeMap::new();
-        entries.insert(FsPath::from("root"), BTreeSet::new());
+        entries.insert(MaildirFsPath::from("root"), BTreeSet::new());
 
         let probes = expect_wants_dir_exists(&mut cor, Some(MaildirReply::DirRead(entries)));
         let reply = probes.into_iter().map(|p| (p, false)).collect();
@@ -254,7 +257,7 @@ mod tests {
         expect_wants_dir_read(&mut cor, None);
 
         let mut entries = BTreeMap::new();
-        entries.insert(FsPath::from("root"), BTreeSet::new());
+        entries.insert(MaildirFsPath::from("root"), BTreeSet::new());
 
         let probes = expect_wants_dir_exists(&mut cor, Some(MaildirReply::DirRead(entries)));
         let reply = probes.into_iter().map(|p| (p, true)).collect();
@@ -271,30 +274,30 @@ mod tests {
 
         let mut entries = BTreeMap::new();
         entries.insert(
-            FsPath::from("root"),
-            BTreeSet::from_iter([FsPath::from("root/Foo")]),
+            MaildirFsPath::from("root"),
+            BTreeSet::from_iter([MaildirFsPath::from("root/Foo")]),
         );
 
         let probes = expect_wants_dir_exists(&mut cor, Some(MaildirReply::DirRead(entries)));
         let reply = probes.into_iter().map(|p| (p, true)).collect();
 
         let next = expect_wants_dir_read(&mut cor, Some(MaildirReply::DirExists(reply)));
-        assert!(next.contains(&FsPath::from("root/Foo")));
+        assert!(next.contains(&MaildirFsPath::from("root/Foo")));
 
         let mut entries = BTreeMap::new();
         entries.insert(
-            FsPath::from("root/Foo"),
-            BTreeSet::from_iter([FsPath::from("root/Foo/Bar")]),
+            MaildirFsPath::from("root/Foo"),
+            BTreeSet::from_iter([MaildirFsPath::from("root/Foo/Bar")]),
         );
 
         let probes = expect_wants_dir_exists(&mut cor, Some(MaildirReply::DirRead(entries)));
         let reply = probes.into_iter().map(|p| (p, true)).collect();
 
         let next = expect_wants_dir_read(&mut cor, Some(MaildirReply::DirExists(reply)));
-        assert!(next.contains(&FsPath::from("root/Foo/Bar")));
+        assert!(next.contains(&MaildirFsPath::from("root/Foo/Bar")));
 
         let mut entries = BTreeMap::new();
-        entries.insert(FsPath::from("root/Foo/Bar"), BTreeSet::new());
+        entries.insert(MaildirFsPath::from("root/Foo/Bar"), BTreeSet::new());
 
         let out = expect_complete_ok(&mut cor, Some(MaildirReply::DirRead(entries)));
         let names: Vec<_> = out.iter().map(|m| m.path().as_str()).collect();
@@ -311,8 +314,11 @@ mod tests {
 
         let mut entries = BTreeMap::new();
         entries.insert(
-            FsPath::from("root"),
-            BTreeSet::from_iter([FsPath::from("root/.Hidden"), FsPath::from("root/Sent")]),
+            MaildirFsPath::from("root"),
+            BTreeSet::from_iter([
+                MaildirFsPath::from("root/.Hidden"),
+                MaildirFsPath::from("root/Sent"),
+            ]),
         );
 
         let probes = expect_wants_dir_exists(&mut cor, Some(MaildirReply::DirRead(entries)));
@@ -327,8 +333,11 @@ mod tests {
 
         let mut entries = BTreeMap::new();
         entries.insert(
-            FsPath::from("root"),
-            BTreeSet::from_iter([FsPath::from("root/.Sent"), FsPath::from("root/Other")]),
+            MaildirFsPath::from("root"),
+            BTreeSet::from_iter([
+                MaildirFsPath::from("root/.Sent"),
+                MaildirFsPath::from("root/Other"),
+            ]),
         );
 
         let probes = expect_wants_dir_exists(&mut cor, Some(MaildirReply::DirRead(entries)));
@@ -350,11 +359,11 @@ mod tests {
 
         let mut entries = BTreeMap::new();
         entries.insert(
-            FsPath::from("root"),
+            MaildirFsPath::from("root"),
             BTreeSet::from_iter([
-                FsPath::from("root/cur"),
-                FsPath::from("root/new"),
-                FsPath::from("root/tmp"),
+                MaildirFsPath::from("root/cur"),
+                MaildirFsPath::from("root/new"),
+                MaildirFsPath::from("root/tmp"),
             ]),
         );
 
@@ -372,9 +381,10 @@ mod tests {
         assert!(matches!(err, MaildirListError::UnexpectedArg(_)));
     }
 
-    // --- utils
-
-    fn expect_wants_dir_read(cor: &mut MaildirList, arg: Option<MaildirReply>) -> BTreeSet<FsPath> {
+    fn expect_wants_dir_read(
+        cor: &mut MaildirList,
+        arg: Option<MaildirReply>,
+    ) -> BTreeSet<MaildirFsPath> {
         match cor.resume(arg) {
             MaildirCoroutineState::Yielded(MaildirYield::WantsDirRead(paths)) => paths,
             state => panic!("expected WantsDirRead, got {state:?}"),
@@ -384,7 +394,7 @@ mod tests {
     fn expect_wants_dir_exists(
         cor: &mut MaildirList,
         arg: Option<MaildirReply>,
-    ) -> BTreeSet<FsPath> {
+    ) -> BTreeSet<MaildirFsPath> {
         match cor.resume(arg) {
             MaildirCoroutineState::Yielded(MaildirYield::WantsDirExists(paths)) => paths,
             state => panic!("expected WantsDirExists, got {state:?}"),

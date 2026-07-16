@@ -1,4 +1,14 @@
-//! Maildir directory structure.
+//! Maildir directory structure: the [`Maildir`] handle over a
+//! cur/new/tmp tree, the [`MaildirSubdir`] enum naming its three
+//! subdirectories and the [`MaildirError`] validation error.
+//!
+//! The I/O-free coroutines managing the tree live in the submodules
+//! next to this file: [`create`], [`delete`], [`list`] and [`rename`].
+
+pub mod create;
+pub mod delete;
+pub mod list;
+pub mod rename;
 
 use core::{
     fmt,
@@ -10,30 +20,38 @@ use alloc::string::String;
 
 use thiserror::Error;
 
-use crate::path::FsPath;
+use crate::path::MaildirFsPath;
 
 /// Failure causes when validating a Maildir on disk.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirError {
+    /// The resolved path exists but is not a directory.
     #[error("path {0} is not a directory")]
-    NotDir(FsPath),
-
+    NotDir(MaildirFsPath),
+    /// One of the cur/new/tmp subdirectories is missing.
     #[error("missing {0}/ subdirectory at Maildir {1}")]
-    MissingSubdir(&'static str, FsPath),
-
+    MissingSubdir(&'static str, MaildirFsPath),
+    /// A subdirectory name is none of cur, new or tmp.
     #[error("invalid Maildir subdir {0:?}: expected cur, new or tmp")]
     InvalidSubdir(String),
 }
 
+/// Name of the `cur` subdirectory, holding entries already seen by a
+/// client.
 pub const CUR: &str = "cur";
+/// Name of the `new` subdirectory, holding freshly delivered entries.
 pub const NEW: &str = "new";
+/// Name of the `tmp` subdirectory, holding entries mid-delivery.
 pub const TMP: &str = "tmp";
 
 /// One of the three Maildir subdirectories: cur, new, tmp.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MaildirSubdir {
+    /// The `cur` subdirectory: entries already seen by a client.
     Cur,
+    /// The `new` subdirectory: freshly delivered, unseen entries.
     New,
+    /// The `tmp` subdirectory: entries still being written.
     Tmp,
 }
 
@@ -60,27 +78,30 @@ impl fmt::Display for MaildirSubdir {
     }
 }
 
-/// A Maildir root on the filesystem (with cur/new/tmp subdirs).
+/// A Maildir root on the filesystem, holding the cur/new/tmp subdirs.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Maildir {
-    root: FsPath,
+    root: MaildirFsPath,
 }
 
 impl Maildir {
     /// Wraps `root` without checking that the subdirectories exist.
-    pub fn from_path(root: impl Into<FsPath>) -> Self {
+    pub fn from_path(root: impl Into<MaildirFsPath>) -> Self {
         Self { root: root.into() }
     }
 
-    pub fn path(&self) -> &FsPath {
+    /// Returns the filesystem path of the Maildir root.
+    pub fn path(&self) -> &MaildirFsPath {
         &self.root
     }
 
+    /// Returns the final component of the root path, if any.
     pub fn name(&self) -> Option<&str> {
         self.root.file_name()
     }
 
-    pub fn subdir(&self, subdir: &MaildirSubdir) -> FsPath {
+    /// Returns the path of the given subdirectory under this Maildir.
+    pub fn subdir(&self, subdir: &MaildirSubdir) -> MaildirFsPath {
         match subdir {
             MaildirSubdir::Cur => self.cur(),
             MaildirSubdir::New => self.new(),
@@ -88,15 +109,21 @@ impl Maildir {
         }
     }
 
-    pub fn cur(&self) -> FsPath {
+    /// Returns the path of the `cur` subdirectory.
+    pub fn cur(&self) -> MaildirFsPath {
         self.root.join(CUR)
     }
 
-    pub fn new(&self) -> FsPath {
+    /// Returns the path of the `new` subdirectory.
+    // NOTE: `new` names the Maildir subdirectory, not a constructor, so
+    // returning a path rather than Self is intended.
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new(&self) -> MaildirFsPath {
         self.root.join(NEW)
     }
 
-    pub fn tmp(&self) -> FsPath {
+    /// Returns the path of the `tmp` subdirectory.
+    pub fn tmp(&self) -> MaildirFsPath {
         self.root.join(TMP)
     }
 }
@@ -107,14 +134,14 @@ impl Hash for Maildir {
     }
 }
 
-impl AsRef<FsPath> for Maildir {
-    fn as_ref(&self) -> &FsPath {
+impl AsRef<MaildirFsPath> for Maildir {
+    fn as_ref(&self) -> &MaildirFsPath {
         &self.root
     }
 }
 
-impl From<FsPath> for Maildir {
-    fn from(root: FsPath) -> Self {
+impl From<MaildirFsPath> for Maildir {
+    fn from(root: MaildirFsPath) -> Self {
         Self { root }
     }
 }

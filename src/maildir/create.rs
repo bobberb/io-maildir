@@ -19,19 +19,20 @@ use core::{fmt, mem};
 
 use alloc::collections::BTreeSet;
 
-use log::trace;
+use log::debug;
 use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    maildir::types::{CUR, NEW, TMP},
-    path::{FsPath, MaildirPath},
+    maildir::{CUR, NEW, TMP},
+    path::{MaildirFsPath, MaildirPath},
     store::MaildirStore,
 };
 
 /// Failure causes during a [`MaildirCreate`] step.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirCreateError {
+    /// A reply arrived that does not match the awaited step.
     #[error("Maildir create failed: unexpected arg {0:?}")]
     UnexpectedArg(Option<MaildirReply>),
 }
@@ -43,6 +44,8 @@ pub struct MaildirCreate {
 }
 
 impl MaildirCreate {
+    /// Builds a coroutine creating the Maildir resolved from `name`
+    /// under `store`, together with its cur/new/tmp subdirectories.
     pub fn new(store: &MaildirStore, name: MaildirPath) -> Self {
         let root = store.resolve(&name);
         let cur = root.join(CUR);
@@ -67,8 +70,6 @@ impl MaildirCoroutine for MaildirCreate {
         &mut self,
         arg: Option<MaildirReply>,
     ) -> MaildirCoroutineState<Self::Yield, Self::Return> {
-        trace!("maildir create: {}", self.state);
-
         match (&mut self.state, arg) {
             (State::Start { paths }, None) => {
                 let paths = mem::take(paths);
@@ -76,6 +77,7 @@ impl MaildirCoroutine for MaildirCreate {
                 MaildirCoroutineState::Yielded(MaildirYield::WantsDirCreate(paths))
             }
             (State::AwaitCreate, Some(MaildirReply::DirCreate)) => {
+                debug!("created maildir");
                 MaildirCoroutineState::Complete(Ok(()))
             }
             (_, arg) => {
@@ -88,7 +90,7 @@ impl MaildirCoroutine for MaildirCreate {
 
 #[derive(Debug)]
 enum State {
-    Start { paths: BTreeSet<FsPath> },
+    Start { paths: BTreeSet<MaildirFsPath> },
     AwaitCreate,
 }
 
@@ -103,18 +105,18 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::maildir::create::*;
 
     fn fs_store() -> MaildirStore {
         MaildirStore {
-            root: FsPath::from("root"),
+            root: MaildirFsPath::from("root"),
             maildirpp: false,
         }
     }
 
     fn maildirpp_store() -> MaildirStore {
         MaildirStore {
-            root: FsPath::from("root"),
+            root: MaildirFsPath::from("root"),
             maildirpp: true,
         }
     }
@@ -125,10 +127,10 @@ mod tests {
 
         let paths = expect_wants_dir_create(&mut cor);
         assert_eq!(paths.len(), 4);
-        assert!(paths.contains(&FsPath::from("root/inbox")));
-        assert!(paths.contains(&FsPath::from("root/inbox/cur")));
-        assert!(paths.contains(&FsPath::from("root/inbox/new")));
-        assert!(paths.contains(&FsPath::from("root/inbox/tmp")));
+        assert!(paths.contains(&MaildirFsPath::from("root/inbox")));
+        assert!(paths.contains(&MaildirFsPath::from("root/inbox/cur")));
+        assert!(paths.contains(&MaildirFsPath::from("root/inbox/new")));
+        assert!(paths.contains(&MaildirFsPath::from("root/inbox/tmp")));
 
         expect_complete_ok(&mut cor, Some(MaildirReply::DirCreate));
     }
@@ -138,10 +140,10 @@ mod tests {
         let mut cor = MaildirCreate::new(&maildirpp_store(), MaildirPath::from("Foo/Bar"));
 
         let paths = expect_wants_dir_create(&mut cor);
-        assert!(paths.contains(&FsPath::from("root/.Foo.Bar")));
-        assert!(paths.contains(&FsPath::from("root/.Foo.Bar/cur")));
-        assert!(paths.contains(&FsPath::from("root/.Foo.Bar/new")));
-        assert!(paths.contains(&FsPath::from("root/.Foo.Bar/tmp")));
+        assert!(paths.contains(&MaildirFsPath::from("root/.Foo.Bar")));
+        assert!(paths.contains(&MaildirFsPath::from("root/.Foo.Bar/cur")));
+        assert!(paths.contains(&MaildirFsPath::from("root/.Foo.Bar/new")));
+        assert!(paths.contains(&MaildirFsPath::from("root/.Foo.Bar/tmp")));
     }
 
     #[test]
@@ -149,8 +151,8 @@ mod tests {
         let mut cor = MaildirCreate::new(&fs_store(), MaildirPath::default());
 
         let paths = expect_wants_dir_create(&mut cor);
-        assert!(paths.contains(&FsPath::from("root")));
-        assert!(paths.contains(&FsPath::from("root/cur")));
+        assert!(paths.contains(&MaildirFsPath::from("root")));
+        assert!(paths.contains(&MaildirFsPath::from("root/cur")));
     }
 
     #[test]
@@ -162,9 +164,7 @@ mod tests {
         assert!(matches!(err, MaildirCreateError::UnexpectedArg(_)));
     }
 
-    // --- utils
-
-    fn expect_wants_dir_create(cor: &mut MaildirCreate) -> BTreeSet<FsPath> {
+    fn expect_wants_dir_create(cor: &mut MaildirCreate) -> BTreeSet<MaildirFsPath> {
         match cor.resume(None) {
             MaildirCoroutineState::Yielded(MaildirYield::WantsDirCreate(paths)) => paths,
             state => panic!("expected WantsDirCreate, got {state:?}"),

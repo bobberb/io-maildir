@@ -1,18 +1,19 @@
 [package]
 name = "io-maildir"
-description = "Maildir client library"
+description = "Maildir client library for Rust"
 version = "0.1.0"
 authors = ["soywod <pimalaya.org@posteo.net>"]
-edition = "2024"
 rust-version = "1.87"
+edition = "2024"
 license = "MIT OR Apache-2.0"
-categories = ["email", "filesystem"]
-keywords = ["email", "maildir", "client", "io-free"]
+categories = ["email", "filesystem", "no-std"]
+keywords = ["email", "maildir", "client", "std", "io-free"]
 homepage = "https://pimalaya.org"
 documentation = "https://docs.rs/io-maildir/latest/io_maildir"
 repository = "https://github.com/pimalaya/io-maildir"
 
 [package.metadata.docs.rs]
+all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
@@ -23,6 +24,7 @@ serde = ["mail-parser?/serde"]
 
 [[example]]
 name = "std_store_entry"
+path = "examples/std_store_entry.rs"
 required-features = ["client"]
 
 [dev-dependencies]
@@ -30,7 +32,7 @@ env_logger = "0.11"
 tempfile = "3.20"
 
 [dependencies]
-gethostname = { version = "1", optional = true }
-log = "0.4"
-mail-parser = { version = "0.11", optional = true }
-thiserror = "2"
+gethostname = { version = "1", default-features = false, optional = true }
+log = { version = "0.4", default-features = false }
+mail-parser = { version = "0.11", default-features = false, optional = true }
+thiserror = { version = "2", default-features = false }

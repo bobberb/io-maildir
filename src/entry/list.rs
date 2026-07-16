@@ -20,14 +20,15 @@ use core::{fmt, mem};
 
 use alloc::collections::BTreeSet;
 
-use log::trace;
+use log::debug;
 use thiserror::Error;
 
-use crate::{coroutine::*, entry::types::MaildirEntry, maildir::types::Maildir, path::FsPath};
+use crate::{coroutine::*, entry::MaildirEntry, maildir::Maildir, path::MaildirFsPath};
 
 /// Failure causes during a [`MaildirEntryList`] step.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirEntryListError {
+    /// A reply arrived that does not match the awaited step.
     #[error("Maildir messages list failed: unexpected arg {0:?}")]
     UnexpectedArg(Option<MaildirReply>),
 }
@@ -40,6 +41,7 @@ pub struct MaildirEntryList {
 }
 
 impl MaildirEntryList {
+    /// Builds a coroutine listing every confirmed entry in the Maildir.
     pub fn new(maildir: Maildir) -> Self {
         Self {
             state: State::Start { maildir },
@@ -55,8 +57,6 @@ impl MaildirCoroutine for MaildirEntryList {
         &mut self,
         arg: Option<MaildirReply>,
     ) -> MaildirCoroutineState<Self::Yield, Self::Return> {
-        trace!("entries list: {}", self.state);
-
         match (&mut self.state, arg) {
             (State::Start { maildir }, None) => {
                 let paths = BTreeSet::from_iter([maildir.new(), maildir.cur()]);
@@ -81,6 +81,7 @@ impl MaildirCoroutine for MaildirEntryList {
                 }
 
                 if candidates.is_empty() {
+                    debug!("listed 0 entries");
                     return MaildirCoroutineState::Complete(Ok(BTreeSet::new()));
                 }
 
@@ -94,6 +95,7 @@ impl MaildirCoroutine for MaildirEntryList {
                     .filter(|p| probes.get(p).copied().unwrap_or(false))
                     .map(MaildirEntry::from_path)
                     .collect();
+                debug!("listed {} entries", confirmed.len());
                 MaildirCoroutineState::Complete(Ok(confirmed))
             }
             (_, arg) => {
@@ -108,7 +110,7 @@ impl MaildirCoroutine for MaildirEntryList {
 enum State {
     Start { maildir: Maildir },
     AwaitRead,
-    AwaitProbe { candidates: BTreeSet<FsPath> },
+    AwaitProbe { candidates: BTreeSet<MaildirFsPath> },
 }
 
 impl fmt::Display for State {
@@ -125,7 +127,7 @@ impl fmt::Display for State {
 mod tests {
     use alloc::collections::BTreeMap;
 
-    use super::*;
+    use crate::entry::list::*;
 
     fn maildir() -> Maildir {
         Maildir::from_path("root")
@@ -137,8 +139,8 @@ mod tests {
         expect_wants_dir_read(&mut cor);
 
         let mut entries = BTreeMap::new();
-        entries.insert(FsPath::from("root/new"), BTreeSet::new());
-        entries.insert(FsPath::from("root/cur"), BTreeSet::new());
+        entries.insert(MaildirFsPath::from("root/new"), BTreeSet::new());
+        entries.insert(MaildirFsPath::from("root/cur"), BTreeSet::new());
         let out = expect_complete_ok(&mut cor, Some(MaildirReply::DirRead(entries)));
         assert!(out.is_empty());
     }
@@ -151,8 +153,6 @@ mod tests {
         let err = expect_complete_err(&mut cor, Some(MaildirReply::DirCreate));
         assert!(matches!(err, MaildirEntryListError::UnexpectedArg(_)));
     }
-
-    // --- utils
 
     fn expect_wants_dir_read(cor: &mut MaildirEntryList) {
         match cor.resume(None) {

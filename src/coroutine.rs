@@ -21,7 +21,7 @@ use alloc::{
     vec::Vec,
 };
 
-use crate::path::FsPath;
+use crate::path::MaildirFsPath;
 
 /// State yielded by a [`MaildirCoroutine::resume`] step.
 ///
@@ -72,39 +72,39 @@ pub trait MaildirCoroutine {
 pub enum MaildirYield {
     /// Driver must check each path for existence as a regular file and resume
     /// with [`MaildirReply::FileExists`].
-    WantsFileExists(BTreeSet<FsPath>),
+    WantsFileExists(BTreeSet<MaildirFsPath>),
 
     /// Driver must check each path for existence as a directory and resume with
     /// [`MaildirReply::DirExists`].
-    WantsDirExists(BTreeSet<FsPath>),
+    WantsDirExists(BTreeSet<MaildirFsPath>),
 
     /// Driver must list each directory's entries and resume with
     /// [`MaildirReply::DirRead`].
-    WantsDirRead(BTreeSet<FsPath>),
+    WantsDirRead(BTreeSet<MaildirFsPath>),
 
     /// Driver must read each file's bytes and resume with
     /// [`MaildirReply::FileRead`].
-    WantsFileRead(BTreeSet<FsPath>),
+    WantsFileRead(BTreeSet<MaildirFsPath>),
 
     /// Driver must write each `(path, bytes)` pair and resume with
     /// [`MaildirReply::FileCreate`].
-    WantsFileCreate(BTreeMap<FsPath, Vec<u8>>),
+    WantsFileCreate(BTreeMap<MaildirFsPath, Vec<u8>>),
 
     /// Driver must create each directory (with parents) and resume with
     /// [`MaildirReply::DirCreate`].
-    WantsDirCreate(BTreeSet<FsPath>),
+    WantsDirCreate(BTreeSet<MaildirFsPath>),
 
     /// Driver must recursively remove each directory and resume with
     /// [`MaildirReply::DirRemove`].
-    WantsDirRemove(BTreeSet<FsPath>),
+    WantsDirRemove(BTreeSet<MaildirFsPath>),
 
     /// Driver must rename each `(from, to)` pair and resume with
     /// [`MaildirReply::Rename`].
-    WantsRename(Vec<(FsPath, FsPath)>),
+    WantsRename(Vec<(MaildirFsPath, MaildirFsPath)>),
 
     /// Driver must copy each `(from, to)` pair and resume with
     /// [`MaildirReply::Copy`].
-    WantsCopy(Vec<(FsPath, FsPath)>),
+    WantsCopy(Vec<(MaildirFsPath, MaildirFsPath)>),
 
     /// Driver must supply the current Unix time and resume with
     /// [`MaildirReply::Time`].
@@ -126,16 +126,16 @@ pub enum MaildirYield {
 #[derive(Clone, Debug)]
 pub enum MaildirReply {
     /// Answer to [`MaildirYield::WantsFileExists`].
-    FileExists(BTreeMap<FsPath, bool>),
+    FileExists(BTreeMap<MaildirFsPath, bool>),
 
     /// Answer to [`MaildirYield::WantsDirExists`].
-    DirExists(BTreeMap<FsPath, bool>),
+    DirExists(BTreeMap<MaildirFsPath, bool>),
 
     /// Answer to [`MaildirYield::WantsDirRead`].
-    DirRead(BTreeMap<FsPath, BTreeSet<FsPath>>),
+    DirRead(BTreeMap<MaildirFsPath, BTreeSet<MaildirFsPath>>),
 
     /// Answer to [`MaildirYield::WantsFileRead`].
-    FileRead(BTreeMap<FsPath, Vec<u8>>),
+    FileRead(BTreeMap<MaildirFsPath, Vec<u8>>),
 
     /// Acknowledgement of [`MaildirYield::WantsFileCreate`].
     FileCreate,
@@ -153,7 +153,12 @@ pub enum MaildirReply {
     Copy,
 
     /// Answer to [`MaildirYield::WantsTime`].
-    Time { secs: u64, nanos: u32 },
+    Time {
+        /// Whole seconds elapsed since the Unix epoch.
+        secs: u64,
+        /// Sub-second remainder in nanoseconds.
+        nanos: u32,
+    },
 
     /// Answer to [`MaildirYield::WantsPid`].
     Pid(u32),

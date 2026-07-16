@@ -5,7 +5,7 @@
 use core::fmt::Write as _;
 
 use alloc::{
-    collections::BTreeMap,
+    collections::{BTreeMap, btree_map::Entry},
     string::{String, ToString},
 };
 
@@ -75,8 +75,8 @@ pub fn allocate_keyword_slot(table: &mut BTreeMap<char, String>, keyword: &str) 
 
     for n in 0..SLOT_COUNT {
         let letter = (SLOT_MIN + n) as char;
-        if !table.contains_key(&letter) {
-            table.insert(letter, keyword.to_string());
+        if let Entry::Vacant(slot) = table.entry(letter) {
+            slot.insert(keyword.to_string());
             return Some(letter);
         }
     }
@@ -95,7 +95,7 @@ fn letter_to_slot(c: char) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::dovecot::utils::*;
 
     #[test]
     fn parse_dovecot_table_basic() {
@@ -112,7 +112,7 @@ mod tests {
         let table = parse_dovecot_keywords(text);
         assert_eq!(table.get(&'a'), Some(&"Important".to_string()));
         assert_eq!(table.get(&'d'), Some(&"Work".to_string()));
-        assert!(table.get(&'b').is_none());
+        assert!(!table.contains_key(&'b'));
     }
 
     #[test]

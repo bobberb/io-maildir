@@ -5,7 +5,7 @@
 //! ```rust,no_run
 //! use io_maildir::{
 //!     client::MaildirClient,
-//!     flag::{add::MaildirFlagsAdd, types::{MaildirFlag, MaildirFlags}},
+//!     flag::{add::MaildirFlagsAdd, MaildirFlag, MaildirFlags},
 //! };
 //!
 //! let client = MaildirClient::new("/path/to/root");
@@ -20,25 +20,26 @@ use core::fmt;
 
 use alloc::string::{String, ToString};
 
-use log::trace;
+use log::debug;
 use thiserror::Error;
 
 use crate::{
     coroutine::*,
+    entry::INFORMATIONAL_SUFFIX_SEPARATOR,
     entry::locate::*,
-    entry::types::INFORMATIONAL_SUFFIX_SEPARATOR,
-    flag::types::MaildirFlags,
-    maildir::types::{Maildir, MaildirSubdir},
+    flag::MaildirFlags,
+    maildir::{Maildir, MaildirSubdir},
     maildir_try,
-    path::FsPath,
+    path::MaildirFsPath,
 };
 
 /// Failure causes during a [`MaildirFlagsAdd`] step.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirFlagsAddError {
+    /// A reply arrived that does not match the awaited step.
     #[error("Maildir flags add failed: unexpected arg {0:?}")]
     UnexpectedArg(Option<MaildirReply>),
-
+    /// The inner locate step failed.
     #[error(transparent)]
     Locate(#[from] MaildirEntryLocateError),
 }
@@ -52,6 +53,7 @@ pub struct MaildirFlagsAdd {
 }
 
 impl MaildirFlagsAdd {
+    /// Builds a coroutine adding flags to a Maildir entry.
     pub fn new(maildir: Maildir, id: impl ToString, flags: MaildirFlags) -> Self {
         let id = id.to_string();
         Self {
@@ -70,14 +72,13 @@ impl MaildirCoroutine for MaildirFlagsAdd {
         &mut self,
         arg: Option<MaildirReply>,
     ) -> MaildirCoroutineState<Self::Yield, Self::Return> {
-        trace!("flags add: {}", self.state);
-
         match (&mut self.state, arg) {
             (State::Locate(c), arg) => {
                 let out = maildir_try!(c, arg);
 
                 match out.subdir {
                     MaildirSubdir::New | MaildirSubdir::Tmp => {
+                        debug!("added flags");
                         MaildirCoroutineState::Complete(Ok(()))
                     }
                     MaildirSubdir::Cur => {
@@ -91,6 +92,7 @@ impl MaildirCoroutine for MaildirFlagsAdd {
                 }
             }
             (State::AwaitRename, Some(MaildirReply::Rename)) => {
+                debug!("added flags");
                 MaildirCoroutineState::Complete(Ok(()))
             }
             (_, arg) => {
@@ -116,7 +118,7 @@ impl fmt::Display for State {
     }
 }
 
-fn rename_with_flags(path: &FsPath, id: &str, flags: &MaildirFlags) -> FsPath {
+fn rename_with_flags(path: &MaildirFsPath, id: &str, flags: &MaildirFlags) -> MaildirFsPath {
     let mut name = String::from(id);
     name.push(INFORMATIONAL_SUFFIX_SEPARATOR);
     name.push_str("2,");
@@ -128,7 +130,7 @@ fn rename_with_flags(path: &FsPath, id: &str, flags: &MaildirFlags) -> FsPath {
 mod tests {
     use alloc::collections::BTreeMap;
 
-    use super::*;
+    use crate::flag::add::*;
 
     fn maildir() -> Maildir {
         Maildir::from_path("root")
@@ -138,24 +140,22 @@ mod tests {
     fn new_subdir_returns_noop_ok() {
         let mut cor = MaildirFlagsAdd::new(maildir(), "abc", MaildirFlags::default());
 
-        let _ = expect_wants_file_exists(&mut cor);
+        expect_wants_file_exists(&mut cor);
 
         let mut probes = BTreeMap::new();
-        probes.insert(FsPath::from("root/new/abc"), true);
-        probes.insert(FsPath::from("root/tmp/abc"), false);
+        probes.insert(MaildirFsPath::from("root/new/abc"), true);
+        probes.insert(MaildirFsPath::from("root/tmp/abc"), false);
         expect_complete_ok(&mut cor, Some(MaildirReply::FileExists(probes)));
     }
 
     #[test]
     fn unexpected_reply_returns_error() {
         let mut cor = MaildirFlagsAdd::new(maildir(), "abc", MaildirFlags::default());
-        let _ = expect_wants_file_exists(&mut cor);
+        expect_wants_file_exists(&mut cor);
 
         let err = expect_complete_err(&mut cor, Some(MaildirReply::DirCreate));
         assert!(matches!(err, MaildirFlagsAddError::Locate(_)));
     }
-
-    // --- utils
 
     fn expect_wants_file_exists(cor: &mut MaildirFlagsAdd) {
         match cor.resume(None) {

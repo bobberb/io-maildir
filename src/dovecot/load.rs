@@ -4,12 +4,12 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use io_maildir::{client::MaildirClient, dovecot::load::DovecotLoad};
+//! use io_maildir::{client::MaildirClient, dovecot::load::MaildirDovecotLoad};
 //!
 //! let client = MaildirClient::new("/path/to/root");
 //! let maildir = client.load_maildir("inbox").unwrap();
 //!
-//! let coroutine = DovecotLoad::new(&maildir);
+//! let coroutine = MaildirDovecotLoad::new(&maildir);
 //! let table = client.run(coroutine).unwrap();
 //!
 //! for (letter, keyword) in &table {
@@ -24,30 +24,33 @@ use alloc::{
     string::String,
 };
 
-use log::trace;
+use log::debug;
 use thiserror::Error;
 
 use crate::{
-    coroutine::*, dovecot::utils::parse_dovecot_keywords, maildir::types::Maildir, path::FsPath,
+    coroutine::*, dovecot::utils::parse_dovecot_keywords, maildir::Maildir, path::MaildirFsPath,
 };
 
 const FILENAME: &str = "dovecot-keywords";
 
-/// Failure causes during a [`DovecotLoad`] step.
+/// Failure causes during a [`MaildirDovecotLoad`] step.
 #[derive(Clone, Debug, Error)]
-pub enum DovecotLoadError {
+pub enum MaildirDovecotLoadError {
+    /// A reply arrived that does not match the awaited step.
     #[error("Maildir dovecot load failed: unexpected arg {0:?}")]
     UnexpectedArg(Option<MaildirReply>),
 }
 
 /// Loads the `dovecot-keywords` slot table for a Maildir.
 #[derive(Debug)]
-pub struct DovecotLoad {
-    path: FsPath,
+pub struct MaildirDovecotLoad {
+    path: MaildirFsPath,
     state: State,
 }
 
-impl DovecotLoad {
+impl MaildirDovecotLoad {
+    /// Builds a coroutine loading the `dovecot-keywords` slot table for
+    /// a Maildir.
     pub fn new(maildir: &Maildir) -> Self {
         Self {
             path: maildir.path().join(FILENAME),
@@ -56,16 +59,14 @@ impl DovecotLoad {
     }
 }
 
-impl MaildirCoroutine for DovecotLoad {
+impl MaildirCoroutine for MaildirDovecotLoad {
     type Yield = MaildirYield;
-    type Return = Result<BTreeMap<char, String>, DovecotLoadError>;
+    type Return = Result<BTreeMap<char, String>, MaildirDovecotLoadError>;
 
     fn resume(
         &mut self,
         arg: Option<MaildirReply>,
     ) -> MaildirCoroutineState<Self::Yield, Self::Return> {
-        trace!("dovecot load: {}", self.state);
-
         match (&mut self.state, arg) {
             (State::Start, None) => {
                 let paths = BTreeSet::from_iter([self.path.clone()]);
@@ -75,6 +76,7 @@ impl MaildirCoroutine for DovecotLoad {
             (State::AwaitProbe, Some(MaildirReply::FileExists(map))) => {
                 let exists = map.get(&self.path).copied().unwrap_or(false);
                 if !exists {
+                    debug!("no dovecot-keywords file, empty table");
                     return MaildirCoroutineState::Complete(Ok(BTreeMap::new()));
                 }
                 let paths = BTreeSet::from_iter([self.path.clone()]);
@@ -85,10 +87,11 @@ impl MaildirCoroutine for DovecotLoad {
                 let bytes = map.remove(&self.path).unwrap_or_default();
                 let text = str::from_utf8(&bytes).unwrap_or("");
                 let table = parse_dovecot_keywords(text);
+                debug!("loaded {} dovecot keywords", table.len());
                 MaildirCoroutineState::Complete(Ok(table))
             }
             (_, arg) => {
-                let err = DovecotLoadError::UnexpectedArg(arg);
+                let err = MaildirDovecotLoadError::UnexpectedArg(arg);
                 MaildirCoroutineState::Complete(Err(err))
             }
         }
@@ -114,20 +117,20 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::dovecot::load::*;
 
     fn maildir() -> Maildir {
         Maildir::from_path("root")
     }
 
-    fn keywords_path() -> FsPath {
-        FsPath::from("root/dovecot-keywords")
+    fn keywords_path() -> MaildirFsPath {
+        MaildirFsPath::from("root/dovecot-keywords")
     }
 
     #[test]
     fn missing_file_returns_empty_table() {
         let m = maildir();
-        let mut cor = DovecotLoad::new(&m);
+        let mut cor = MaildirDovecotLoad::new(&m);
 
         expect_wants_file_exists(&mut cor);
 
@@ -140,7 +143,7 @@ mod tests {
     #[test]
     fn present_file_returns_parsed_table() {
         let m = maildir();
-        let mut cor = DovecotLoad::new(&m);
+        let mut cor = MaildirDovecotLoad::new(&m);
 
         expect_wants_file_exists(&mut cor);
 
@@ -162,17 +165,15 @@ mod tests {
     #[test]
     fn unexpected_reply_returns_error() {
         let m = maildir();
-        let mut cor = DovecotLoad::new(&m);
+        let mut cor = MaildirDovecotLoad::new(&m);
 
         expect_wants_file_exists(&mut cor);
 
         let err = expect_complete_err(&mut cor, Some(MaildirReply::DirCreate));
-        assert!(matches!(err, DovecotLoadError::UnexpectedArg(_)));
+        assert!(matches!(err, MaildirDovecotLoadError::UnexpectedArg(_)));
     }
 
-    // --- utils
-
-    fn expect_wants_file_exists(cor: &mut DovecotLoad) {
+    fn expect_wants_file_exists(cor: &mut MaildirDovecotLoad) {
         match cor.resume(None) {
             MaildirCoroutineState::Yielded(MaildirYield::WantsFileExists(paths)) => {
                 assert!(paths.contains(&keywords_path()));
@@ -182,7 +183,7 @@ mod tests {
     }
 
     fn expect_complete_ok(
-        cor: &mut DovecotLoad,
+        cor: &mut MaildirDovecotLoad,
         arg: Option<MaildirReply>,
     ) -> BTreeMap<char, String> {
         match cor.resume(arg) {
@@ -191,7 +192,10 @@ mod tests {
         }
     }
 
-    fn expect_complete_err(cor: &mut DovecotLoad, arg: Option<MaildirReply>) -> DovecotLoadError {
+    fn expect_complete_err(
+        cor: &mut MaildirDovecotLoad,
+        arg: Option<MaildirReply>,
+    ) -> MaildirDovecotLoadError {
         match cor.resume(arg) {
             MaildirCoroutineState::Complete(Err(err)) => err,
             state => panic!("expected Complete(Err), got {state:?}"),

@@ -32,9 +32,9 @@ use std::path::Path;
 
 use io_maildir::{
     client::MaildirClient,
-    flag::types::{MaildirFlag, MaildirFlags},
-    maildir::types::MaildirSubdir,
-    path::FsPath,
+    flag::{MaildirFlag, MaildirFlags},
+    maildir::MaildirSubdir,
+    path::MaildirFsPath,
 };
 use tempfile::tempdir;
 
@@ -43,7 +43,7 @@ fn end_to_end() {
     let _ = env_logger::try_init();
 
     let dir = tempdir().expect("create tempdir");
-    let root = FsPath::new(dir.path().to_string_lossy().into_owned());
+    let root = MaildirFsPath::new(dir.path().to_string_lossy().into_owned());
     let client = MaildirClient::new(root.clone());
 
     // ── MAILDIR LIST (baseline) ─────────────────────────────────────

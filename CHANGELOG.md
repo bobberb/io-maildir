@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Renamed `FsPath` to `MaildirFsPath` and the dovecot coroutines `DovecotLoad` / `DovecotStore` (with their error companions) to `MaildirDovecotLoad` / `MaildirDovecotStore`, so every public item carries the crate domain prefix.
+
+- Flattened the per-module `types` submodules into their parents: `entry::types::*`, `flag::types::*` and `maildir::types::*` are now reached as `entry::*`, `flag::*` and `maildir::*`.
+
+- Realigned the README, the lib.rs header, CONTRIBUTING.md, Cargo.toml and added a docs/ folder to follow the Pimalaya documentation and naming guidelines, and documented every remaining public item.
+
 ## [0.1.0] - 2026-06-05
 
 ### Added

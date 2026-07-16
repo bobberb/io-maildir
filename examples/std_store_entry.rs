@@ -7,7 +7,7 @@
 //! ```
 
 use io_maildir::{
-    client::MaildirClient, flag::types::MaildirFlags, maildir::types::MaildirSubdir, path::FsPath,
+    client::MaildirClient, flag::MaildirFlags, maildir::MaildirSubdir, path::MaildirFsPath,
 };
 use tempfile::tempdir;
 
@@ -15,7 +15,7 @@ fn main() {
     env_logger::init();
 
     let tmp = tempdir().unwrap();
-    let root = FsPath::new(tmp.path().to_string_lossy().into_owned());
+    let root = MaildirFsPath::new(tmp.path().to_string_lossy().into_owned());
 
     let client = MaildirClient::new(root);
 

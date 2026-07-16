@@ -1,19 +1,19 @@
 //! Layout-aware view of a Maildir tree.
 //!
 //! Wraps the filesystem root with the layout convention used to map a
-//! logical [`MaildirPath`] to its on-disk [`FsPath`]. Plain Maildir is
+//! logical [`MaildirPath`] to its on-disk [`MaildirFsPath`]. Plain Maildir is
 //! the zero-subfolders degenerate case of fs.
 
 use alloc::string::String;
 
-use crate::path::{FsPath, MaildirPath};
+use crate::path::{MaildirFsPath, MaildirPath};
 
 /// Root folder holding one or more Maildirs, plus the layout used to
 /// translate logical mailbox names to on-disk paths.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MaildirStore {
     /// Filesystem root that holds the tree.
-    pub root: FsPath,
+    pub root: MaildirFsPath,
     /// Maildir++ rules: root is itself INBOX, subfolders are dot-prefixed flat
     /// siblings of cur/new/tmp at the root, no nesting. Default off: fs layout
     /// (recursive descent through real nested directories).
@@ -27,7 +27,7 @@ impl MaildirStore {
     /// In fs layout, `"Foo/Bar"` → `<root>/Foo/Bar`. In Maildir++ layout,
     /// `"Foo/Bar"` → `<root>/.Foo.Bar`. The empty path resolves to the store
     /// root itself.
-    pub fn resolve(&self, path: &MaildirPath) -> FsPath {
+    pub fn resolve(&self, path: &MaildirPath) -> MaildirFsPath {
         if path.is_empty() {
             return self.root.clone();
         }
@@ -50,7 +50,7 @@ impl MaildirStore {
     /// Reverse of [`Self::resolve`]: given an on-disk fs path inside
     /// this store, returns the logical mailbox name. Returns `None` if
     /// `fs` is outside the store root.
-    pub fn relative(&self, fs: &FsPath) -> Option<MaildirPath> {
+    pub fn relative(&self, fs: &MaildirFsPath) -> Option<MaildirPath> {
         let rel = fs.strip_prefix(&self.root)?;
         if rel.is_empty() {
             return Some(MaildirPath::default());
@@ -75,14 +75,14 @@ impl MaildirStore {
 #[cfg(test)]
 mod tests {
     use crate::{
-        path::{FsPath, MaildirPath},
+        path::{MaildirFsPath, MaildirPath},
         store::MaildirStore,
     };
 
     #[test]
     fn resolve_fs_empty_is_root() {
         let store = MaildirStore {
-            root: FsPath::from("/tmp/m"),
+            root: MaildirFsPath::from("/tmp/m"),
             maildirpp: false,
         };
         assert_eq!(store.resolve(&MaildirPath::default()).as_str(), "/tmp/m");
@@ -91,7 +91,7 @@ mod tests {
     #[test]
     fn resolve_fs_nested() {
         let store = MaildirStore {
-            root: FsPath::from("/tmp/m"),
+            root: MaildirFsPath::from("/tmp/m"),
             maildirpp: false,
         };
         assert_eq!(
@@ -103,7 +103,7 @@ mod tests {
     #[test]
     fn resolve_maildirpp_flat_dotted() {
         let store = MaildirStore {
-            root: FsPath::from("/tmp/m"),
+            root: MaildirFsPath::from("/tmp/m"),
             maildirpp: true,
         };
         assert_eq!(
@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn resolve_maildirpp_empty_is_root() {
         let store = MaildirStore {
-            root: FsPath::from("/tmp/m"),
+            root: MaildirFsPath::from("/tmp/m"),
             maildirpp: true,
         };
         assert_eq!(store.resolve(&MaildirPath::default()).as_str(), "/tmp/m");
@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn relative_fs_round_trip() {
         let store = MaildirStore {
-            root: FsPath::from("/tmp/m"),
+            root: MaildirFsPath::from("/tmp/m"),
             maildirpp: false,
         };
         let logical = MaildirPath::from("Foo/Bar");
@@ -135,7 +135,7 @@ mod tests {
     #[test]
     fn relative_maildirpp_round_trip() {
         let store = MaildirStore {
-            root: FsPath::from("/tmp/m"),
+            root: MaildirFsPath::from("/tmp/m"),
             maildirpp: true,
         };
         let logical = MaildirPath::from("Foo/Bar");
@@ -146,9 +146,9 @@ mod tests {
     #[test]
     fn relative_outside_store_is_none() {
         let store = MaildirStore {
-            root: FsPath::from("/tmp/m"),
+            root: MaildirFsPath::from("/tmp/m"),
             maildirpp: false,
         };
-        assert_eq!(store.relative(&FsPath::from("/other/path")), None);
+        assert_eq!(store.relative(&MaildirFsPath::from("/other/path")), None);
     }
 }

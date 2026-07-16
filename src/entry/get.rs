@@ -18,20 +18,21 @@ use core::{fmt, mem};
 
 use alloc::{collections::BTreeSet, string::ToString};
 
-use log::trace;
+use log::{debug, trace};
 use thiserror::Error;
 
 use crate::{
-    coroutine::*, entry::locate::*, entry::types::MaildirFullEntry, maildir::types::Maildir,
-    maildir_try, path::FsPath,
+    coroutine::*, entry::MaildirFullEntry, entry::locate::*, maildir::Maildir, maildir_try,
+    path::MaildirFsPath,
 };
 
 /// Failure causes during a [`MaildirEntryGet`] step.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirEntryGetError {
+    /// A reply arrived that does not match the awaited step.
     #[error("Maildir message get failed: unexpected arg {0:?}")]
     UnexpectedArg(Option<MaildirReply>),
-
+    /// The inner locate step failed.
     #[error(transparent)]
     Locate(#[from] MaildirEntryLocateError),
 }
@@ -43,6 +44,7 @@ pub struct MaildirEntryGet {
 }
 
 impl MaildirEntryGet {
+    /// Builds a coroutine fetching the Maildir entry with the given ID.
     pub fn new(maildir: Maildir, id: impl ToString) -> Self {
         Self {
             state: State::Locate(MaildirEntryLocate::new(maildir, id)),
@@ -58,8 +60,6 @@ impl MaildirCoroutine for MaildirEntryGet {
         &mut self,
         arg: Option<MaildirReply>,
     ) -> MaildirCoroutineState<Self::Yield, Self::Return> {
-        trace!("entry get: {}", self.state);
-
         match (&mut self.state, arg) {
             (State::Locate(c), arg) => {
                 let out = maildir_try!(c, arg);
@@ -70,6 +70,8 @@ impl MaildirCoroutine for MaildirEntryGet {
             (State::AwaitRead { path }, Some(MaildirReply::FileRead(map))) => {
                 let path = mem::take(path);
                 let contents = map.into_values().next().unwrap_or_default();
+                debug!("got entry");
+                trace!("path: {path}");
                 MaildirCoroutineState::Complete(Ok(MaildirFullEntry::from((path, contents))))
             }
             (_, arg) => {
@@ -83,7 +85,7 @@ impl MaildirCoroutine for MaildirEntryGet {
 #[derive(Debug)]
 enum State {
     Locate(MaildirEntryLocate),
-    AwaitRead { path: FsPath },
+    AwaitRead { path: MaildirFsPath },
 }
 
 impl fmt::Display for State {
@@ -97,7 +99,7 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::entry::get::*;
 
     fn maildir() -> Maildir {
         Maildir::from_path("root")
@@ -106,13 +108,11 @@ mod tests {
     #[test]
     fn unexpected_reply_returns_error() {
         let mut cor = MaildirEntryGet::new(maildir(), "abc");
-        let _ = expect_wants_file_exists(&mut cor);
+        expect_wants_file_exists(&mut cor);
 
         let err = expect_complete_err(&mut cor, Some(MaildirReply::DirCreate));
         assert!(matches!(err, MaildirEntryGetError::Locate(_)));
     }
-
-    // --- utils
 
     fn expect_wants_file_exists(cor: &mut MaildirEntryGet) {
         match cor.resume(None) {

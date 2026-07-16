@@ -19,18 +19,19 @@ use core::{fmt, mem};
 
 use alloc::collections::BTreeSet;
 
-use log::trace;
+use log::debug;
 use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    path::{FsPath, MaildirPath},
+    path::{MaildirFsPath, MaildirPath},
     store::MaildirStore,
 };
 
 /// Failure causes during a [`MaildirDelete`] step.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirDeleteError {
+    /// A reply arrived that does not match the awaited step.
     #[error("Maildir delete failed: unexpected arg {0:?}")]
     UnexpectedArg(Option<MaildirReply>),
 }
@@ -42,6 +43,8 @@ pub struct MaildirDelete {
 }
 
 impl MaildirDelete {
+    /// Builds a coroutine recursively removing the Maildir resolved
+    /// from `name` under `store`.
     pub fn new(store: &MaildirStore, name: MaildirPath) -> Self {
         let paths = BTreeSet::from_iter([store.resolve(&name)]);
         Self {
@@ -58,8 +61,6 @@ impl MaildirCoroutine for MaildirDelete {
         &mut self,
         arg: Option<MaildirReply>,
     ) -> MaildirCoroutineState<Self::Yield, Self::Return> {
-        trace!("maildir delete: {}", self.state);
-
         match (&mut self.state, arg) {
             (State::Start { paths }, None) => {
                 let paths = mem::take(paths);
@@ -67,6 +68,7 @@ impl MaildirCoroutine for MaildirDelete {
                 MaildirCoroutineState::Yielded(MaildirYield::WantsDirRemove(paths))
             }
             (State::AwaitRemove, Some(MaildirReply::DirRemove)) => {
+                debug!("deleted maildir");
                 MaildirCoroutineState::Complete(Ok(()))
             }
             (_, arg) => {
@@ -79,7 +81,7 @@ impl MaildirCoroutine for MaildirDelete {
 
 #[derive(Debug)]
 enum State {
-    Start { paths: BTreeSet<FsPath> },
+    Start { paths: BTreeSet<MaildirFsPath> },
     AwaitRemove,
 }
 
@@ -94,18 +96,18 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::maildir::delete::*;
 
     fn fs_store() -> MaildirStore {
         MaildirStore {
-            root: FsPath::from("root"),
+            root: MaildirFsPath::from("root"),
             maildirpp: false,
         }
     }
 
     fn maildirpp_store() -> MaildirStore {
         MaildirStore {
-            root: FsPath::from("root"),
+            root: MaildirFsPath::from("root"),
             maildirpp: true,
         }
     }
@@ -116,7 +118,7 @@ mod tests {
 
         let paths = expect_wants_dir_remove(&mut cor);
         assert_eq!(paths.len(), 1);
-        assert!(paths.contains(&FsPath::from("root/inbox")));
+        assert!(paths.contains(&MaildirFsPath::from("root/inbox")));
 
         expect_complete_ok(&mut cor, Some(MaildirReply::DirRemove));
     }
@@ -126,7 +128,7 @@ mod tests {
         let mut cor = MaildirDelete::new(&maildirpp_store(), MaildirPath::from("Foo/Bar"));
 
         let paths = expect_wants_dir_remove(&mut cor);
-        assert!(paths.contains(&FsPath::from("root/.Foo.Bar")));
+        assert!(paths.contains(&MaildirFsPath::from("root/.Foo.Bar")));
     }
 
     #[test]
@@ -138,9 +140,7 @@ mod tests {
         assert!(matches!(err, MaildirDeleteError::UnexpectedArg(_)));
     }
 
-    // --- utils
-
-    fn expect_wants_dir_remove(cor: &mut MaildirDelete) -> BTreeSet<FsPath> {
+    fn expect_wants_dir_remove(cor: &mut MaildirDelete) -> BTreeSet<MaildirFsPath> {
         match cor.resume(None) {
             MaildirCoroutineState::Yielded(MaildirYield::WantsDirRemove(paths)) => paths,
             state => panic!("expected WantsDirRemove, got {state:?}"),

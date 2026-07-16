@@ -7,8 +7,8 @@
 //! use io_maildir::{
 //!     client::MaildirClient,
 //!     entry::store::{MaildirEntryStore, MaildirEntryStoreOutput},
-//!     flag::types::MaildirFlags,
-//!     maildir::types::MaildirSubdir,
+//!     flag::MaildirFlags,
+//!     maildir::MaildirSubdir,
 //! };
 //!
 //! let client = MaildirClient::new("/path/to/root");
@@ -32,15 +32,15 @@ use alloc::{
     vec::Vec,
 };
 
-use log::trace;
+use log::{debug, trace};
 use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    entry::types::INFORMATIONAL_SUFFIX_SEPARATOR,
-    flag::types::MaildirFlags,
-    maildir::types::{Maildir, MaildirSubdir},
-    path::FsPath,
+    entry::INFORMATIONAL_SUFFIX_SEPARATOR,
+    flag::MaildirFlags,
+    maildir::{Maildir, MaildirSubdir},
+    path::MaildirFsPath,
 };
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -48,6 +48,7 @@ static COUNTER: AtomicU32 = AtomicU32::new(0);
 /// Failure causes during a [`MaildirEntryStore`] step.
 #[derive(Clone, Debug, Error)]
 pub enum MaildirEntryStoreError {
+    /// A reply arrived that does not match the awaited step.
     #[error("Maildir message store failed: unexpected arg {0:?}")]
     UnexpectedArg(Option<MaildirReply>),
 }
@@ -55,8 +56,10 @@ pub enum MaildirEntryStoreError {
 /// Successful output of [`MaildirEntryStore`].
 #[derive(Clone, Debug)]
 pub struct MaildirEntryStoreOutput {
+    /// The unique ID assigned to the stored entry.
     pub id: String,
-    pub path: FsPath,
+    /// The final filesystem path of the stored entry.
+    pub path: MaildirFsPath,
 }
 
 /// Stores a new entry in a Maildir via the tmp → cur/new rename
@@ -71,6 +74,8 @@ pub struct MaildirEntryStore {
 }
 
 impl MaildirEntryStore {
+    /// Builds a coroutine storing a new entry in the Maildir via the
+    /// tmp to cur/new rename dance.
     pub fn new(
         maildir: Maildir,
         subdir: MaildirSubdir,
@@ -95,8 +100,6 @@ impl MaildirCoroutine for MaildirEntryStore {
         &mut self,
         arg: Option<MaildirReply>,
     ) -> MaildirCoroutineState<Self::Yield, Self::Return> {
-        trace!("entry store: {}", self.state);
-
         match (&mut self.state, arg) {
             (State::Start, None) => {
                 self.state = State::AwaitTime;
@@ -157,6 +160,8 @@ impl MaildirCoroutine for MaildirEntryStore {
             (State::AwaitRename { final_path, id }, Some(MaildirReply::Rename)) => {
                 let final_path = mem::take(final_path);
                 let id = mem::take(id);
+                debug!("stored entry {id}");
+                trace!("path: {final_path}");
                 MaildirCoroutineState::Complete(Ok(MaildirEntryStoreOutput {
                     id,
                     path: final_path,
@@ -184,12 +189,12 @@ enum State {
         pid: u32,
     },
     AwaitCreateTmp {
-        tmp_path: FsPath,
-        final_path: FsPath,
+        tmp_path: MaildirFsPath,
+        final_path: MaildirFsPath,
         id: String,
     },
     AwaitRename {
-        final_path: FsPath,
+        final_path: MaildirFsPath,
         id: String,
     },
 }
@@ -209,7 +214,7 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::entry::store::*;
 
     fn maildir() -> Maildir {
         Maildir::from_path("root")
