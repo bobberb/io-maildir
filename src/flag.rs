@@ -26,11 +26,31 @@ impl From<&MaildirPath> for MaildirFlags {
             return Default::default();
         };
 
-        let Some((_, flags)) = file_name.rsplit_once(',') else {
+        let Some((_, letters)) = file_name.rsplit_once(',') else {
             return Default::default();
         };
 
-        MaildirFlags::from_iter(flags.chars().filter_map(MaildirFlag::from_char))
+        // Partition the info-section: named IANA letters (P/R/S/T/D/F)
+        // become variants; every other letter (dovecot `a..z` slot
+        // letters in particular) is carried verbatim in `extra_letters`
+        // so flag-op round-trips do not strip the keyword's slot.
+        let mut flags = BTreeSet::new();
+        let mut extra_letters = BTreeSet::new();
+        for c in letters.chars() {
+            match MaildirFlag::from_char(c) {
+                Some(flag) => {
+                    flags.insert(flag);
+                }
+                None => {
+                    extra_letters.insert(c);
+                }
+            }
+        }
+
+        MaildirFlags {
+            flags,
+            extra_letters,
+        }
     }
 }
 

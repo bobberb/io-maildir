@@ -461,13 +461,38 @@ impl MaildirClient {
         let keywords = flags.drain_keywords();
 
         if let Some(header) = self.keywords_header {
-            if !keywords.is_empty() {
-                let sep = match header.separator() {
+            let separator = header.separator();
+            // A keyword containing the header separator would split into
+            // multiple corrupted keywords on read-back; skip it rather
+            // than emit a corruptible header. Dropping is acceptable
+            // degradation; silent corruption is not.
+            let safe: Vec<&String> = keywords
+                .iter()
+                .filter(|k| {
+                    if k.contains(separator) {
+                        log::warn!(
+                            "keyword `{k}` contains header separator `{separator}`; \
+                             dropping from {} header",
+                            header.header_name()
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+
+            if !safe.is_empty() {
+                let sep = match separator {
                     ',' => ", ",
                     ' ' => " ",
                     _ => ", ",
                 };
-                let value = keywords.join(sep);
+                let value = safe
+                    .iter()
+                    .map(|k| k.as_str())
+                    .collect::<Vec<_>>()
+                    .join(sep);
                 contents = crate::headers::inject_header(&contents, header.header_name(), &value);
             }
         }
